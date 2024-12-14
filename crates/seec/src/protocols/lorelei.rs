@@ -102,10 +102,8 @@ pub enum LoreleiGate<R> {
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ConvGate {
-    // A2B needs an addition circuit, so it can't be represented as a single gate
+    // Arith2Blinded needs interaction and setup sampling, where both parties send and receive something, based on party number select wether to send or receive first
     Arith2BlindedSnd,
-    // resharing a value needs two gates, mhhh, or maybe it's just not a symm gate?
-    Arith2BlindedRcv,
     // Blinded2Arith can be done noninteractively and is the same for both sides
     Blinded2Arith,
 }
