@@ -24,6 +24,7 @@ pub mod aby2;
 pub mod arithmetic_gmw;
 pub mod boolean_gmw;
 pub mod mixed_gmw;
+pub mod lorelei;
 #[cfg(feature = "aby2")]
 pub mod tensor_aby2;
 
