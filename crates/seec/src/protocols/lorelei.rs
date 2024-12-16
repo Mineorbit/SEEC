@@ -60,27 +60,14 @@ pub enum Lorelei<R> {
 impl<R> Lorelei<R> {
     pub fn into_blinded(self) -> Option<bool> {
         match self {
-            Mixed::Blinded(b) => Some(b),
-            Mixed::Arith(_) => None,
+            Lorelei::Blinded(b) => Some(b),
+            Lorelei::Arith(_) => None,
         }
     }
     pub fn into_arith(self) -> Option<R> {
         match self {
-            Mixed::Blinded(_) => None,
-            Mixed::Arith(r) => Some(r),
-        }
-    }
-
-    pub fn unwrap_blinded(self) -> bool {
-        match self {
-            Mixed::Blinded(b) => b,
-            Mixed::Arith(_) => panic!("called unwrap_bool on Arith"),
-        }
-    }
-    pub fn unwrap_arith(self) -> R {
-        match self {
-            Mixed::Blinded(_) => panic!("called unwrap_arith on Bool"),
-            Mixed::Arith(r) => r,
+            Lorelei::Blinded(_) => None,
+            Lorelei::Arith(r) => Some(r),
         }
     }
 }
@@ -103,7 +90,7 @@ pub enum LoreleiGate<R> {
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ConvGate {
     // Arith2Blinded needs interaction and setup sampling, where both parties send and receive something, based on party number select wether to send or receive first
-    Arith2BlindedSnd,
+    Arith2Blinded,
     // Blinded2Arith can be done noninteractively and is the same for both sides
     Blinded2Arith,
 }
@@ -111,55 +98,14 @@ pub enum ConvGate {
 // TODO, mhh Default will be complicated, iirc it is used during executor setup but the
 //  method has no access to whether bool or arith is needed
 #[derive(Clone, Debug, Hash, PartialOrd, PartialEq)]
-pub enum MixedShareStorage<R: Ring> {
+pub enum LoreleiShareStorage<R: Ring> {
     Bool(<boolean_gmw::BooleanGmw as Protocol>::ShareStorage),
     Arith(<arithmetic_gmw::ArithmeticGmw<R> as Protocol>::ShareStorage),
     Mixed(Vec<Mixed<R>>),
 }
 
-impl<R: Ring> Extend<Mixed<R>> for MixedShareStorage<R> {
-    fn extend<T: IntoIterator<Item = Mixed<R>>>(&mut self, iter: T) {
-        let mut iter = iter.into_iter();
-        let rec_extend = |this: &mut Self, sh, iter| {
-            this.as_mixed();
-            this.try_push(sh);
-            this.extend(iter);
-        };
-        match self {
-            MixedShareStorage::Bool(bv) => {
-                while let Some(val) = iter.next() {
-                    match val {
-                        Mixed::Bool(b) => {
-                            bv.push(b);
-                        }
-                        a @ Mixed::Arith(_) => {
-                            rec_extend(self, a, iter);
-                            return;
-                        }
-                    }
-                }
-            }
-            MixedShareStorage::Arith(v) => {
-                while let Some(val) = iter.next() {
-                    match val {
-                        b @ Mixed::Bool(_) => {
-                            rec_extend(self, b, iter);
-                            return;
-                        }
-                        Mixed::Arith(a) => {
-                            v.push(a);
-                        }
-                    }
-                }
-            }
-            MixedShareStorage::Mixed(v) => {
-                v.extend(iter);
-            }
-        }
-    }
-}
 
-impl<R: Ring> MixedShareStorage<R> {
+impl<R: Ring> LoreleiShareStorage<R> {
     pub fn try_push(&mut self, s: Mixed<R>) {
         match (self, s) {
             (Self::Bool(bv), Mixed::Bool(b)) => {
@@ -182,13 +128,13 @@ impl<R: Ring> MixedShareStorage<R> {
 
     pub fn as_mixed(&mut self) {
         *self = match self {
-            MixedShareStorage::Bool(bv) => {
-                MixedShareStorage::Mixed(bv.iter().by_vals().map(Mixed::Bool).collect())
+            LoreleiShareStorage::Bool(bv) => {
+                LoreleiShareStorage::Mixed(bv.iter().by_vals().map(Mixed::Bool).collect())
             }
-            MixedShareStorage::Arith(av) => {
-                MixedShareStorage::Mixed(mem::take(av).into_iter().map(Mixed::Arith).collect())
+            LoreleiShareStorage::Arith(av) => {
+                LoreleiShareStorage::Mixed(mem::take(av).into_iter().map(Mixed::Arith).collect())
             }
-            MixedShareStorage::Mixed(_) => return,
+            LoreleiShareStorage::Mixed(_) => return,
         }
     }
 }
@@ -314,42 +260,6 @@ impl<R: Ring> SetupStorage for MixedSetupStorage<R> {
 #[derive(Default, Clone)]
 pub struct InsecureMixedSetup<R>(PhantomData<R>);
 
-#[async_trait]
-impl<R> MTProvider for InsecureMixedSetup<R>
-where
-    R: Ring,
-    Standard: Distribution<R>,
-{
-    type Output = MixedSetupStorage<R>;
-    type Error = Infallible;
-
-    async fn precompute_mts(&mut self, _amount: usize) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    // TODO this method is bogus at the moment...
-    async fn request_mts(&mut self, amount: usize) -> Result<Self::Output, Self::Error> {
-        let rng = ChaCha8Rng::seed_from_u64(42);
-        // both parties sample the same bits, so th plain sample bit is always zero
-        let bool = rng.sample_iter(Standard).take(amount).collect();
-        // TODO this needs sooo much memory
-        let shared_bits = SharedBits {
-            bool,
-            arith: vec![R::ZERO; amount * R::BITS],
-        };
-        Ok(MixedSetupStorage {
-            bool: boolean::InsecureMTProvider::default()
-                .request_mts(amount)
-                .await
-                .unwrap(),
-            arith: arithmetic::InsecureMTProvider::default()
-                .request_mts(amount)
-                .await
-                .unwrap(),
-            shared_bits,
-        })
-    }
-}
 
 impl<R> Protocol for MixedGmw<R>
 where
@@ -389,16 +299,6 @@ where
 
         match gate {
             MixedGate::Base(base) => base.default_evaluate(party_id, inputs),
-            MixedGate::Bool(g) => {
-                let inputs = inputs.map(|i| match i {
-                    Mixed::Bool(b) => b,
-                    Mixed::Arith(_) => {
-                        panic!("Received arithmetic share as input for Boolean {g:?}")
-                    }
-                });
-                let out = self.b.evaluate_non_interactive(party_id, g, inputs);
-                Mixed::Bool(out)
-            }
             MixedGate::Arith(g) => {
                 let inputs = inputs.map(|i| match i {
                     Mixed::Arith(e) => e,
@@ -656,12 +556,12 @@ impl<R: Ring> Gate<Mixed<R>> for MixedGate<R> {
 
     fn is_interactive(&self) -> bool {
         match self {
-            MixedGate::Bool(g) => g.is_interactive(),
-            MixedGate::Arith(g) => g.is_interactive(),
+            MixedGate::Blinded(g) => false, // every blinded gate (even multiplication) is non interactive but has setup
+            MixedGate::Arith(g) => false, // every arithmetic gate is non interactive
             MixedGate::Conv(
-                ConvGate::A2BBoolShareSnd | ConvGate::A2BBoolShareRcv | ConvGate::B2A,
-            ) => true,
-            MixedGate::Conv(ConvGate::A2BSelectBit(_) | ConvGate::Select) => false,
+                ConvGate::Arith2Blinded
+            ) => true, // only resharing, input and output are arithmetic
+            MixedGate::Conv(ConvGate::Blinded2Arith) => false,
             MixedGate::Base(_) => false,
         }
     }
@@ -673,10 +573,8 @@ impl<R: Ring> Gate<Mixed<R>> for MixedGate<R> {
             MixedGate::Base(g) => g.input_size(),
             // TODO mhh, Rcv doesn't really need an input, but maybe it's better to have it symm
             MixedGate::Conv(
-                ConvGate::A2BBoolShareSnd | ConvGate::A2BBoolShareRcv | ConvGate::A2BSelectBit(_),
-            ) => 1,
-            MixedGate::Conv(ConvGate::Select) => 2,
-            MixedGate::Conv(ConvGate::B2A) => R::BITS,
+                ConvGate::Arith2Blinded | ConvGate::Blinded2Arith,
+            ) => 1
         }
     }
 
