@@ -648,7 +648,7 @@ where
     }
 }
 
-pub fn a2b<R: Ring>(bc: &mut BaseCircuit<Mixed<R>, MixedGate<R>>, a: GateId) -> Vec<GateId> {
+pub fn arith2blinded<R: Ring>(bc: &mut BaseCircuit<Mixed<R>, MixedGate<R>>, a: GateId) -> Vec<GateId> {
     let a2b0 = bc.add_wired_gate(MixedGate::Conv(ConvGate::A2BBoolShareSnd), &[a]);
     let a2b1 = bc.add_wired_gate(MixedGate::Conv(ConvGate::A2BBoolShareRcv), &[a]);
     // potentially switch gates, depending on party_id of executing party
@@ -709,46 +709,46 @@ mod tests {
     use bitvec::vec::BitVec;
 
     #[tokio::test]
-    async fn simple_bool_logic() -> anyhow::Result<()> {
-        let mut bc: BaseCircuit<Mixed<u32>, MixedGate<u32>> = BaseCircuit::new();
+    async fn simple_bool_circ() -> anyhow::Result<()> {
+        let mut bc: BaseCircuit<Lorelei<u32>, LoreleiGate<u32>> = BaseCircuit::new();
 
-        let in0 = bc.add_gate(MixedGate::Base(BaseGate::Input(ScalarDim)));
-        let in1 = bc.add_gate(MixedGate::Base(BaseGate::Input(ScalarDim)));
-        let and = bc.add_wired_gate(MixedGate::Bool(BooleanGate::And), &[in0, in1]);
-        bc.add_wired_gate(MixedGate::Base(BaseGate::Output(ScalarDim)), &[and]);
+        let in0 = bc.add_gate(LoreleiGate::Base(BaseGate::Input(ScalarDim)));
+        let in1 = bc.add_gate(LoreleiGate::Base(BaseGate::Input(ScalarDim)));
+        let and = bc.add_wired_gate(LoreleiGate::Bool(BooleanGate::And), &[in0, in1]);
+        bc.add_wired_gate(LoreleiGate::Base(BaseGate::Output(ScalarDim)), &[and]);
         let ec = ExecutableCircuit::DynLayers(bc.into());
 
-        let out: MixedShareStorage<u32> = execute_circuit::<
-            MixedGmw<u32>,
+        let out: LoreleiShareStorage<u32> = execute_circuit::<
+            Lorelei<u32>,
             u32,
-            MixedSharing<_, _, u32>,
+            LoreleiSharing<_, _, u32>,
         >(&ec, (true, true), TestChannel::InMemory)
         .await?;
 
-        let exp = MixedShareStorage::Bool(BitVec::repeat(true, 1));
+        let exp = LoreleiShareStorage::Bool(BitVec::repeat(true, 1));
         assert_eq!(out, exp);
         Ok(())
     }
 
     #[tokio::test]
     async fn simple_arith_circ() -> anyhow::Result<()> {
-        let mut bc = BaseCircuit::<Mixed<u32>, MixedGate<u32>, _>::new();
-        let inp1 = bc.add_gate(MixedGate::Base(BaseGate::Input(ScalarDim)));
-        let inp2 = bc.add_gate(MixedGate::Base(BaseGate::Input(ScalarDim)));
-        let inp3 = bc.add_gate(MixedGate::Base(BaseGate::Input(ScalarDim)));
-        let add = bc.add_wired_gate(MixedGate::Arith(ArithmeticGate::Add), &[inp1, inp2]);
-        let mul = bc.add_wired_gate(MixedGate::Arith(ArithmeticGate::Mul), &[inp3, add]);
-        bc.add_wired_gate(MixedGate::Base(BaseGate::Output(ScalarDim)), &[mul]);
+        let mut bc = BaseCircuit::<Lorelei<u32>, LoreleiGate<u32>, _>::new();
+        let inp1 = bc.add_gate(LoreleiGate::Base(BaseGate::Input(ScalarDim)));
+        let inp2 = bc.add_gate(LoreleiGate::Base(BaseGate::Input(ScalarDim)));
+        let inp3 = bc.add_gate(LoreleiGate::Base(BaseGate::Input(ScalarDim)));
+        let add = bc.add_wired_gate(LoreleiGate::Arith(ArithmeticGate::Add), &[inp1, inp2]);
+        let mul = bc.add_wired_gate(LoreleiGate::Arith(ArithmeticGate::Mul), &[inp3, add]);
+        bc.add_wired_gate(LoreleiGate::Base(BaseGate::Output(ScalarDim)), &[mul]);
 
         let ec = ExecutableCircuit::DynLayers(bc.into());
 
-        let out = execute_circuit::<MixedGmw<u32>, u32, MixedSharing<_, _, u32>>(
+        let out = execute_circuit::<Lorelei<u32>, u32, LoreleiSharing<_, _, u32>>(
             &ec,
             (5, 5, 10),
             TestChannel::InMemory,
         )
         .await?;
-        let exp = MixedShareStorage::Arith(vec![100]);
+        let exp = LoreleiShareStorage::Arith(vec![100]);
         assert_eq!(out, exp);
 
         Ok(())
@@ -757,22 +757,22 @@ mod tests {
     #[tokio::test]
     async fn low_depth_add_test() -> anyhow::Result<()> {
         let _g = init_tracing();
-        let mut bc = BaseCircuit::<Mixed<u8>, MixedGate<u8>, _>::new();
+        let mut bc = BaseCircuit::<Lorelei<u8>, MixedGate<u8>, _>::new();
 
         let inp1: Vec<_> = (0..8)
-            .map(|_| bc.add_gate(MixedGate::Base(BaseGate::Input(ScalarDim))))
+            .map(|_| bc.add_gate(LoreleiGate::Base(BaseGate::Input(ScalarDim))))
             .collect();
         let inp2: Vec<_> = (0..8)
-            .map(|_| bc.add_gate(MixedGate::Base(BaseGate::Input(ScalarDim))))
+            .map(|_| bc.add_gate(LoreleiGate::Base(BaseGate::Input(ScalarDim))))
             .collect();
         let added = depth_optimized_add(&mut bc, &inp1, &inp2);
         for g in added {
-            bc.add_wired_gate(MixedGate::Base(BaseGate::Output(ScalarDim)), &[g]);
+            bc.add_wired_gate(LoreleiGate::Base(BaseGate::Output(ScalarDim)), &[g]);
         }
 
         let ec = ExecutableCircuit::DynLayers(bc.into());
 
-        let out = execute_circuit::<MixedGmw<u8>, DefaultIdx, MixedSharing<_, _, u8>>(
+        let out = execute_circuit::<Lorelei<u8>, DefaultIdx, MixedSharing<_, _, u8>>(
             &ec,
             (ToBool(200), ToBool(100)),
             TestChannel::InMemory,
