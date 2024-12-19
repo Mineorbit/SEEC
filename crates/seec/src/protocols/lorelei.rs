@@ -24,42 +24,50 @@ use std::error::Error;
 use std::fmt::Debug;
 use std::ops::Not;
 
-#[derive(Clone, Debug)]
+// ring ABY2 protocol (will need ring implementation of aby2.rs)
+#[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
+pub struct ABY2<R> {
+
+}
+
+// ring arithmetic GMW like protocol
+#[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
+pub struct Arithmetic<R> {
+
+}
+
+// Lorelei Protocol context struct
+#[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
 pub struct Lorelei<R> {
-    delta_sharing_state: DeltaSharing,
+    b: ABY2<R>,
+    a: Arithmetic<R>,
 }
 
-
-
-#[derive(Clone, Debug)]
-pub struct DeltaSharing {
-    pub(crate) private_rng: ChaChaRng,
-    pub(crate) local_joint_rng: ChaChaRng,
-    pub(crate) remote_joint_rng: ChaChaRng,
+// Gate Mode
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Mode<R> {
+    Blinded(R),
+    Arith(R),
 }
-
-
 
 
 #[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct BlindedShare {
+pub struct BlindedShare<R> {
     pub(crate) m: R,
     pub(crate) l: R,
 }
 
-
-
 #[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct ArithmeticShare {
-    pub(crate) a: R,
+pub struct ArithmeticShare<R> {
+    pub(crate) x: R
 }
 
 
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Msg {
-    Delta { delta: Vec<R> },
+#[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
+pub struct LoreleiShare<R> {
+    pub(crate) b: BlindedShare<R>,
+    pub(crate) a: ArithmeticShare<R>
 }
 
 
@@ -87,6 +95,7 @@ pub enum ArithmeticGate<R> {
 
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum BlindedGate<R>{
+    Base(BaseGate<R>),
     Mult { n: u8 },
     Add { n: u8 },
 }
