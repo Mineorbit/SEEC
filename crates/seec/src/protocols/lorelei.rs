@@ -85,6 +85,38 @@ pub struct EvalShares {
     shares: BitVec,
 }
 
+// Note: arithmetic has no Multiplication for us
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ArithmeticGate<R> {
+    Base(BaseGate<R>),
+    Add,
+    Sub,
+}
+
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum BlindedGate<R>{
+    Mult { n: u8 },
+    Add { n: u8 },
+}
+
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ConvGate {
+    Blinded2Arithmetic,
+    Arithmetic2Blinded
+}
+
+
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum LoreleiGate<R> {
+    Base(BaseGate<Lorelei<R>>),
+    Blinded(BlindedGate<R>),
+    Arith(ArithmeticGate<R>),
+    Conv(ConvGate),
+}
+
+
+
+
 
 pub type AbySetupMsg = executor::Message<BooleanGmw>;
 
