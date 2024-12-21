@@ -31,18 +31,18 @@ use std::ops::Not;
 // 2 party OT based setup provider
 
 
-pub type Aby2SetupMsg<R> = executor::Message<Blinded<R>>;
+pub type LoreleiSetupMsg<R> = executor::Message<Blinded<R>>;
 
-pub struct Aby2SetupProvider<Mtp,R: Ring> {
+pub struct LoreleiSetupProvider<Mtp,R: Ring> {
     party_id: usize,
     mt_provider: Mtp,
-    sender: seec_channel::Sender<Aby2SetupMsg<R>>,
-    receiver: seec_channel::Receiver<Aby2SetupMsg<R>>,
+    sender: seec_channel::Sender<LoreleiSetupMsg<R>>,
+    receiver: seec_channel::Receiver<LoreleiSetupMsg<R>>,
     setup_data: Option<DeltaShareData<R>>,
 }
 
 #[async_trait]
-impl<MtpErr, Mtp, Idx> FunctionDependentSetup<Blinded, Idx> for Aby2SetupProvider<Mtp>
+impl<MtpErr, Mtp, Idx> FunctionDependentSetup<Blinded, Idx> for LoreleiSetupProvider<Mtp>
 where
     MtpErr: Error + Send + Sync + Debug + 'static,
     Mtp: MTProvider<Output = MulTriples, Error = MtpErr> + Send,
@@ -52,7 +52,7 @@ where
 
     async fn setup(
         &mut self,
-        shares: &GateOutputs<ShareVec>,
+        shares: &GateOutputs<Self::ShareVec>,
         circuit: &ExecutableCircuit<bool, BooleanGate, Idx>,
     ) -> Result<(), Self::Error> {
         let circ_builder: CircuitBuilder<bool, boolean_gmw::BooleanGate, Idx> =
@@ -144,16 +144,17 @@ where
 
 
 
-// -----  ring Blinded protocol (almost the same as ABY2.0 on rings, except non interactive multiplication)
+// -----  ring Lorelei combined arithmetic and blinded protocol
+
 
 #[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
-pub struct Blinded<R: Ring> {
-    delta_sharing_state: BlindedSharing,
+pub struct Lorelei<R: Ring> {
+    delta_sharing_state: BlindedSharingContext,
     _p: PhantomData<R>
 }
 
 #[derive(Clone, Debug)]
-pub struct BlindedSharing {
+pub struct BlindedSharingContext {
     pub(crate) private_rng: ChaChaRng,
     pub(crate) local_joint_rng: ChaChaRng,
     pub(crate) remote_joint_rng: ChaChaRng,
@@ -161,7 +162,7 @@ pub struct BlindedSharing {
 
 
 
-impl<R: Ring> Protocol for Blinded<R> {
+impl<R: Ring> Protocol for Lorelei<R> {
     const SIMD_SUPPORT: bool = false;
     type Plain = R;
     type Share = BlindedShare;
@@ -253,8 +254,14 @@ pub enum Msg {
     Delta { delta: Vec<u8> },
 }
 
-/// Contains preprocessing data (`[\delta_ab]_i`) for interactive gates in
-/// **reverse** topological order. This is needed to evaluate interactive gates.
+
+
+
+// ---- Sharing structure
+
+
+// Setup (Offline Shares)
+
 #[derive(Clone, Default)]
 pub struct DeltaShareData<R> {
     eval_shares: Vec<DeltaShares<R>>,
@@ -286,6 +293,15 @@ impl<R> SetupStorage for DeltaShareData<R> {
 }
 
 
+// Computation (Online Shares)
+
+
+#[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
+pub struct LoreleiShare<R> {
+    pub(crate) b: BlindedShare<R>,
+    pub(crate) a: ArithmeticShare<R>
+}
+
 
 #[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
 pub struct BlindedShare<R: Ring> {
@@ -300,125 +316,12 @@ pub struct BlindedShareVec<R: Ring> {
 }
 
 
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum BlindedGate<R: Ring>{
-    Base(BaseGate<R>),
-    Mul { n: u8 },
-    Add { n: u8 },
-}
-
-
-impl<R: Ring>  Gate<R> for BlindedGate<R> {
-    type DimTy = ScalarDim;
-
-    fn is_interactive(&self) -> bool {
-        false
-    }
-
-    fn input_size(&self) -> usize {
-        match self {
-            BlindedGate::Base(base_gate) => base_gate.input_size(),
-            BlindedGate::Mul { n } => *n as usize,
-            BlindedGate::Add { n } => *n as usize,
-        }
-    }
-
-    fn as_base_gate(&self) -> Option<&BaseGate<R>> {
-        match self {
-            BlindedGate::Base(base_gate) => Some(base_gate),
-            _ => None,
-        }
-    }
-
-    fn wrap_base_gate(base_gate: BaseGate<R, Self::DimTy>) -> Self {
-        Self::Base(base_gate)
-    }
-}
-
-
-impl<R> From<BaseGate<R>> for BlindedGate<R> {
-    fn from(base_gate: BaseGate<R>) -> Self {
-        BlindedGate::Base(base_gate)
-    }
-}
-
-
-
-
-
-// -----  ring arithmetic GMW like protocol
-
-
-#[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
-pub struct Arithmetic<R> {
-
-}
-
 #[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
 pub struct ArithmeticShare<R> {
     pub(crate) x: R
 }
 
-// Note: arithmetic has only multiplication by constant
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum ArithmeticGate<R> {
-    Base(BaseGate<R>),
-    Mul { n: u8 },
-    Add { n: u8 },
-}
 
-
-impl<R: Ring> Gate<R> for ArithmeticGate<R> {
-    type DimTy = ScalarDim;
-
-    fn is_interactive(&self) -> bool {
-        false
-    }
-
-    fn input_size(&self) -> usize {
-        match self {
-            BlindedGate::Base(base_gate) => base_gate.input_size(),
-            BlindedGate::Mul { n } => *n as usize,
-            BlindedGate::Add { n } => *n as usize,
-        }
-    }
-
-    fn as_base_gate(&self) -> Option<&BaseGate<R>> {
-        match self {
-            ArithmeticGate::Base(base_gate) => Some(base_gate),
-            _ => None,
-        }
-    }
-
-    fn wrap_base_gate(base_gate: BaseGate<R>) -> Self {
-        Self::Base(base_gate)
-    }
-}
-
-impl<R> From<BaseGate<R>> for ArithmeticGate<R> {
-    fn from(base_gate: BaseGate<R>) -> Self {
-        ArithmeticGate::Base(base_gate)
-    }
-}
-
-
-
-// -----  ring Lorelei combined arithmetic and blinded protocol
-
-
-
-#[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
-pub struct Lorelei<R> {
-    b: Blinded<R>,
-    a: Arithmetic<R>,
-}
-
-// Gate Mode
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum Mode<R> {
-    Blinded(R),
-    Arith(R),
-}
 
 #[derive(Debug)]
 pub struct LoreleiSharing<B, A, R> {
@@ -430,13 +333,22 @@ pub struct LoreleiSharing<B, A, R> {
 
 
 
-#[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct LoreleiShare<R> {
-    pub(crate) b: BlindedShare<R>,
-    pub(crate) a: ArithmeticShare<R>
+// ---- Gate Structure
+
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum LoreleiGate<R> {
+    Base(BaseGate<Lorelei<R>>),
+    Arith(ArithmeticGate<R>),
+    Conv(ConvGate),
 }
 
+// Gate Mode
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Mode<R> {
+    Blinded(R),
+    Arith(R),
+}
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ConvGate {
@@ -445,16 +357,46 @@ pub enum ConvGate {
 }
 
 
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum LoreleiGate<R> {
-    Base(BaseGate<Lorelei<R>>),
-    Blinded(BlindedGate<R>),
-    Arith(ArithmeticGate<R>),
-    Conv(ConvGate),
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ArithmeticGate<R> {
+    Base(BaseGate<R>),
+    Mul { n: u8 },
+    Add { n: u8 },
+}
+
+impl<R: Ring>  Gate<R> for ArithmeticGate<R> {
+    type DimTy = ScalarDim;
+
+    fn is_interactive(&self) -> bool {
+        false
+    }
+
+    fn input_size(&self) -> usize {
+        match self {
+            ArithmeticGate::Base(base_gate) => base_gate.input_size(),
+            ArithmeticGate::Mul { n } => *n as usize,
+            ArithmeticGate::Add { n } => *n as usize,
+        }
+    }
+
+    fn as_base_gate(&self) -> Option<&BaseGate<R>> {
+        match self {
+            ArithmeticGate::Base(base_gate) => Some(base_gate),
+            _ => None,
+        }
+    }
+
+    fn wrap_base_gate(base_gate: BaseGate<R, Self::DimTy>) -> Self {
+        Self::Base(base_gate)
+    }
 }
 
 
-
+impl<R> From<BaseGate<R>> for ArithmeticGate<R> {
+    fn from(base_gate: BaseGate<R>) -> Self {
+        ArithmeticGate::Base(base_gate)
+    }
+}
 
 
 
