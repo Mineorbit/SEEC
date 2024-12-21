@@ -14,6 +14,7 @@ use ahash::AHashMap;
 use async_trait::async_trait;
 use itertools::Itertools;
 use rand::{Rng, SeedableRng};
+use std::marker::PhantomData;
 use rand_chacha::ChaChaRng;
 use seec_channel::multi::{MultiReceiver, MultiSender};
 use serde::{Deserialize, Serialize};
@@ -24,19 +25,89 @@ use std::error::Error;
 use std::fmt::Debug;
 use std::ops::Not;
 
-// ring ABY2 protocol (will need ring implementation of aby2.rs)
+// -----  ring ABY2 protocol (will need ring implementation of aby2.rs)
+
 #[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
 pub struct ABY2<R> {
 
 }
 
-// ring arithmetic GMW like protocol
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Msg {
+    Delta { delta: Vec<u8> },
+}
+
+/// Contains preprocessing data (`[\delta_ab]_i`) for interactive gates in
+/// **reverse** topological order. This is needed to evaluate interactive gates.
+#[derive(Clone, Default)]
+pub struct DeltaShareData<R> {
+    eval_shares: Vec<DeltaShares<R>>,
+}
+
+#[derive(Clone)]
+pub struct DeltaShares<R> {
+    shares: Vec<R>,
+}
+
+
+pub type Aby2SetupMsg = executor::Message<ABY2>;
+
+pub struct Aby2SetupProvider<Mtp,R> {
+    party_id: usize,
+    mt_provider: Mtp,
+    sender: seec_channel::Sender<Aby2SetupMsg>,
+    receiver: seec_channel::Receiver<Aby2SetupMsg>,
+    setup_data: Option<DeltaShareData<R>>,
+}
+
+
+#[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
+pub struct BlindedShare<R> {
+    pub(crate) m: R,
+    pub(crate) l: R,
+}
+
+
+
+
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum BlindedGate<R>{
+    Base(BaseGate<R>),
+    Mult { n: u8 },
+    Add { n: u8 },
+}
+
+
+
+
+
+// -----  ring arithmetic GMW like protocol
+
+
 #[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
 pub struct Arithmetic<R> {
 
 }
 
-// Lorelei Protocol context struct
+#[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
+pub struct ArithmeticShare<R> {
+    pub(crate) x: R
+}
+
+// Note: arithmetic has only multiplication by constant
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ArithmeticGate<R> {
+    Base(BaseGate<R>),
+    Mult { n: u8 },
+    Add { n: u8 },
+}
+
+
+
+// -----  ring Lorelei combined arithmetic and blinded protocol
+
+
+
 #[derive(Clone, Debug, Default, Hash, Eq, PartialEq)]
 pub struct Lorelei<R> {
     b: ABY2<R>,
@@ -50,17 +121,13 @@ pub enum Mode<R> {
     Arith(R),
 }
 
-
-#[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct BlindedShare<R> {
-    pub(crate) m: R,
-    pub(crate) l: R,
+#[derive(Debug)]
+pub struct LoreleiSharing<B, A, R> {
+    bool: B,
+    arith: A,
+    ring: PhantomData<R>,
 }
 
-#[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct ArithmeticShare<R> {
-    pub(crate) x: R
-}
 
 
 
@@ -71,20 +138,6 @@ pub struct LoreleiShare<R> {
 }
 
 
-// Note: arithmetic has only multiplication by constant
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum ArithmeticGate<R> {
-    Base(BaseGate<R>),
-    Mult { n: u8 },
-    Add { n: u8 },
-}
-
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum BlindedGate<R>{
-    Base(BaseGate<R>),
-    Mult { n: u8 },
-    Add { n: u8 },
-}
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ConvGate {
@@ -105,6 +158,8 @@ pub enum LoreleiGate<R> {
 
 
 
+
+
 #[cfg(test)]
 mod tests {
     use super::LoreleiGate as LG;
@@ -116,34 +171,32 @@ mod tests {
 
     #[tokio::test]
     async fn multi_mult() {
-        let mut c = BaseCircuit::<bool, LG>::new();
-        let i0 = c.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
-        let i1 = c.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
-        let i2 = c.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
-        let i3 = c.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
-        let a = c.add_wired_gate(LG::Mult { n: 4 }, &[i0, i1, i2, i3]);
-        let _out = c.add_wired_gate(LG::Base(BaseGate::Output(ScalarDim)), &[a]);
-        let c = ExecutableCircuit::DynLayers(c.into());
 
-        let (ch0, ch1) = seec_channel::in_memory::new_pair(16);
-        let setup0 = AbySetupProvider::new(0, InsecureMTProvider::default(), ch0.0, ch0.1);
-        let setup1 = AbySetupProvider::new(1, InsecureMTProvider::default(), ch1.0, ch1.1);
-        let p_state = BooleanAby2::new(DeltaSharing::insecure_default());
-        let (mut ex1, mut ex2) = tokio::try_join!(
-            Executor::new_with_state(p_state.clone(), &c, 0, setup0),
-            Executor::new_with_state(p_state, &c, 1, setup1),
+        type RING = u32;
+        // Setting up circuit
+        let mut circuit = BaseCircuit::<RING, LG>::new();
+        let i0 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
+        let i1 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
+        let i2 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
+        let i3 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
+        let a = circuit.add_wired_gate(LG::Mult { n: 3 }, &[i0, i1, i2]);
+        let reshare = arith2blinded(&mut c, a);
+        let b = circuit.add_wired_gate(LG::Mult { n: 2 }, &[reshare, i3]);
+        let _out = circuit.add_wired_gate(LG::Base(BaseGate::Output(ScalarDim)), &[b]);
+        let circuit = ExecutableCircuit::DynLayers(circuit.into());
+
+
+        // Create protocol context
+        let out = execute_circuit::<Lorelei<RING>, DefaultIdx, MixedSharing<_, _, RING>>(
+            &circuit,
+            (2,2,2,2),
+            TestChannel::InMemory,
         )
-        .unwrap();
-
-        let (inp0, mask) = DeltaSharing::insecure_default().share(bitvec!(u8, Lsb0; 1, 1, 1, 1));
-        let inp1 = DeltaSharing::insecure_default().plain_delta_to_share(mask);
-        let (mut ch1, mut ch2) = seec_channel::in_memory::new_pair(2);
-
-        let h1 = ex1.execute(Input::Scalar(inp0), &mut ch1.0, &mut ch1.1);
-        let h2 = ex2.execute(Input::Scalar(inp1), &mut ch2.0, &mut ch2.1);
-        let (res1, res2) = tokio::try_join!(h1, h2).unwrap();
-        let res =
-            DeltaSharing::reconstruct(res1.into_scalar().unwrap(), res2.into_scalar().unwrap());
-        assert_eq!(BitVec::<u8>::repeat(true, 1), res);
+        .await?;
+        let mut exp = BitVec::from_element(8);
+        exp.truncate(32);
+        let exp = MixedShareStorage::Bool(exp);
+        assert_eq!(out, exp);
+        Ok(())
     }
 }
