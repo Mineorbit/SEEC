@@ -53,9 +53,9 @@ where
     async fn setup(
         &mut self,
         shares: &GateOutputs<Self::ShareVec>,
-        circuit: &ExecutableCircuit<bool, BooleanGate, Idx>,
+        circuit: &ExecutableCircuit<R, LoreleiGate, Idx>,
     ) -> Result<(), Self::Error> {
-        let circ_builder: CircuitBuilder<bool, boolean_gmw::BooleanGate, Idx> =
+        let circ_builder: CircuitBuilder<R, boolean_gmw::LoreleiGate, Idx> =
             CircuitBuilder::new();
         let old = circ_builder.install();
         let total_inputs: usize = circuit
