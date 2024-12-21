@@ -31,7 +31,7 @@ use std::ops::Not;
 // 2 party OT based setup provider
 
 
-pub type LoreleiSetupMsg<R> = executor::Message<Blinded<R>>;
+pub type LoreleiSetupMsg<R> = executor::Message<Lorelei<R>>;
 
 pub struct LoreleiSetupProvider<Mtp,R: Ring> {
     party_id: usize,
@@ -42,7 +42,7 @@ pub struct LoreleiSetupProvider<Mtp,R: Ring> {
 }
 
 #[async_trait]
-impl<MtpErr, Mtp, Idx> FunctionDependentSetup<Blinded, Idx> for LoreleiSetupProvider<Mtp>
+impl<MtpErr, Mtp, Idx> FunctionDependentSetup<Lorelei, Idx> for LoreleiSetupProvider<Mtp>
 where
     MtpErr: Error + Send + Sync + Debug + 'static,
     Mtp: MTProvider<Output = MulTriples, Error = MtpErr> + Send,
