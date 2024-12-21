@@ -35,8 +35,6 @@ pub struct DeltaSharing {
     pub(crate) private_rng: ChaChaRng,
     pub(crate) local_joint_rng: ChaChaRng,
     pub(crate) remote_joint_rng: ChaChaRng,
-    // TODO ughh
-    pub(crate) input_position_share_type_map: HashMap<usize, ShareType>,
 }
 
 #[derive(Copy, Clone, Debug)]
