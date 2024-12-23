@@ -53,83 +53,12 @@ where
 
     async fn setup(
         &mut self,
-        shares: &GateOutputs<LoreleiShareVec<R>>,
+        shares: &GateOutputs<ShareStorage<LoreleiShare<R>>>,
         circuit: &ExecutableCircuit<R, LoreleiGate<R>, Idx>,
     ) -> Result<(), Self::Error> {
-        let circ_builder: CircuitBuilder<R, LoreleiGate<R>, Idx> =
-            CircuitBuilder::new();
-        let old = circ_builder.install();
-        let total_inputs: usize = circuit
-            .interactive_iter()
-            .map(|(gate, _)| 2_usize.pow(gate.input_size() as u32))
-            .sum();
+        // TODO: redo from aby boolean example but with rolled in structure
 
-        let mut circ_inputs = BitVec::<usize>::with_capacity(total_inputs);
-        // Block is needed as otherwise !Send types are held over .await
-        let setup_outputs: Vec<Vec<_>> = {
-            let mut input_sw_map: AHashMap<_, Secret<_, Idx>> =
-                AHashMap::with_capacity(total_inputs);
-            let mut setup_outputs = Vec::with_capacity(circuit.interactive_count());
-            let mut setup_sub_circ_cache = AHashMap::with_capacity(total_inputs);
-            for (gate, _gate_id, parents) in circuit.interactive_with_parents_iter() {
-                let mut gate_input_shares = vec![];
-                parents.for_each(|parent| match input_sw_map.entry(parent) {
-                    Entry::Vacant(vacant) => {
-                        let sh = Secret::<_, Idx>::input(0);
-                        gate_input_shares.push(sh.clone());
-                        circ_inputs.push(shares.get(parent).get_private());
-                        vacant.insert(sh);
-                    }
-                    Entry::Occupied(occupied) => {
-                        gate_input_shares.push(occupied.get().clone());
-                    }
-                });
-
-                // TODO does this impact correctness??
-                gate_input_shares.sort();
-
-                let t = gate.setup_data_circ(gate_input_shares.iter(), &mut setup_sub_circ_cache);
-                setup_outputs.push(t);
-            }
-            setup_outputs
-                .into_iter()
-                .map(|v| v.into_iter().map(|opt_sh| opt_sh.output()).collect())
-                .collect()
-        };
-
-        let setup_data_circ: ExecutableCircuit<R, LoreleiGate, Idx> =
-            ExecutableCircuit::DynLayers(CircuitBuilder::global_into_circuit());
-        old.install();
-        let mut executor: Executor<Lorelei, Idx> =
-            Executor::new(&setup_data_circ, self.party_id, &mut self.mt_provider)
-                .await
-                .expect("Executor::new in AbySetupProvider");
-        executor
-            .execute(
-                Input::Scalar(circ_inputs),
-                &mut self.sender,
-                &mut self.receiver,
-            )
-            .await
-            .unwrap();
-        let Input::Scalar(executor_gate_outputs) = executor.gate_outputs().get_sc(0) else {
-            panic!("SIMD not supported for ABY2");
-        };
-
-        let eval_shares = circuit
-            .interactive_iter()
-            .zip(setup_outputs)
-            .map(|((gate, _gate_id), setup_out)| match gate {
-                ArithmeticGate::Mul { n: u8 } => {
-                    let shares = setup_out
-                        .into_iter()
-                        .map(|out_id| executor_gate_outputs.get(out_id.as_usize()))
-                        .collect();
-                    DeltaShares { shares }
-                }
-                _ => unreachable!(),
-            })
-            .collect();
+        
         self.setup_data = Some(DeltaShareData::from_raw(eval_shares));
         Ok(())
     }
@@ -171,7 +100,7 @@ impl<R: Ring> Protocol for Lorelei<R> {
     type SimdMsg = ();
     type Gate = LoreleiGate<R>;
     type Wire = ();
-    type ShareStorage = LoreleiShareVec<R>;
+    type ShareStorage = ShareStorage<LoreleiShare<R>>;
     type SetupStorage = DeltaShareData<R>;
 
     fn share_constant(
@@ -212,11 +141,11 @@ impl<R: Ring> Protocol for Lorelei<R> {
         }
     }
 
-    // there are no interactive gates so this is never called
+    // on conv gate and input output do something else not
     fn compute_msg(
         &self,
         party_id: usize,
-        interactive_gates: impl Iterator<Item = LoreleiGate>,
+        interactive_gates: impl Iterator<Item = LoreleiGate<R>>,
         gate_outputs: impl Iterator<Item = Self::Share>,
         mut inputs: impl Iterator<Item = Self::Share>,
         preprocessing_data: &mut Self::SetupStorage,
@@ -224,11 +153,11 @@ impl<R: Ring> Protocol for Lorelei<R> {
         assert!(false)
     }
 
-    // there are no interactive gates so this is never called
+    // on conv gate and input output do something else not
     fn evaluate_interactive(
         &self,
         _party_id: usize,
-        _interactive_gates: impl Iterator<Item = LoreleiGate>,
+        _interactive_gates: impl Iterator<Item = LoreleiGate<R>>,
         gate_outputs: impl Iterator<Item = Self::Share>,
         Msg::Delta { delta }: Self::Msg,
         Msg::Delta { delta: other_delta }: Self::Msg,
@@ -274,7 +203,7 @@ pub struct DeltaShares<R> {
 }
 
 
-impl<R> SetupStorage for DeltaShareData<R> {
+impl<R: Ring> SetupStorage for DeltaShareData<R> {
     fn len(&self) -> usize {
         self.eval_shares.len()
     }
@@ -298,15 +227,19 @@ impl<R> SetupStorage for DeltaShareData<R> {
 
 
 #[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct LoreleiShare<R> {
+pub struct LoreleiShare<R: Ring> {
     pub(crate) b: BlindedShare<R>,
     pub(crate) a: ArithmeticShare<R>
 }
 
-impl<R> Share for LoreleiShare<R> {
 
+// currently do not support SIMD, so this is place holding
+impl<R: Ring> Share for LoreleiShare<R> {
+    type Plain = R;
+    type SimdShare = ShareStorage<LoreleiShare<R>>;
 }
 
+/*
 
 #[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
 pub struct LoreleiShareVec<R: Ring> {
@@ -314,7 +247,7 @@ pub struct LoreleiShareVec<R: Ring> {
     pub(crate) a: Vec<ArithmeticShare<R>>
 }
 
-impl<R: Ring> ShareStorage<Share> for LoreleiShareVec<R> {
+impl<R: Ring> ShareStorage<LoreleiShare<R>> for LoreleiShareVec<R> {
     fn len(&self) -> usize {
         cmp::max(self.a.len(),self.b.len())
     }
@@ -338,7 +271,7 @@ impl<R: Ring> ShareStorage<Share> for LoreleiShareVec<R> {
         }
     }
 }
-
+*/
 
 #[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
 pub struct BlindedShare<R: Ring> {
@@ -372,8 +305,8 @@ pub struct LoreleiSharing<B, A, R> {
 
 // ---- Gate Structure
 
-#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum LoreleiGate<R> {
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Debug)]
+pub enum LoreleiGate<R: Ring> {
     Base(BaseGate<Lorelei<R>>),
     Arith(ArithmeticGate<R>),
     Conv(ConvGate),
@@ -416,7 +349,7 @@ impl<R: Ring>  Gate<R> for LoreleiGate<R> {
 }
 
 
-impl<R> From<BaseGate<R>> for LoreleiGate<R> {
+impl<R: Ring> From<BaseGate<R>> for LoreleiGate<R> {
     fn from(base_gate: BaseGate<R>) -> Self {
         LoreleiGate::Base(base_gate)
     }
