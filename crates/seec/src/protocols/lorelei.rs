@@ -6,7 +6,7 @@ use crate::gate::base::BaseGate;
 use crate::mul_triple::boolean::MulTriples;
 use crate::mul_triple::MTProvider;
 use crate::protocols::{
-    Ring, FunctionDependentSetup, Gate, Protocol, ScalarDim, SetupStorage, ShareStorage,
+    Ring, FunctionDependentSetup, Gate, Protocol, ScalarDim, SetupStorage, ShareStorage, Share
 };
 use crate::secret::Secret;
 use crate::utils::take_arr;
@@ -42,7 +42,7 @@ pub struct LoreleiSetupProvider<Mtp,R: Ring> {
 }
 
 #[async_trait]
-impl<MtpErr, Mtp, Idx> FunctionDependentSetup<Lorelei, Idx> for LoreleiSetupProvider<Mtp>
+impl<MtpErr, Mtp, Idx, R: Ring> FunctionDependentSetup<Lorelei<R>, Idx> for LoreleiSetupProvider<Mtp,R>
 where
     MtpErr: Error + Send + Sync + Debug + 'static,
     Mtp: MTProvider<Output = MulTriples, Error = MtpErr> + Send,
@@ -52,10 +52,10 @@ where
 
     async fn setup(
         &mut self,
-        shares: &GateOutputs<Self::ShareVec>,
-        circuit: &ExecutableCircuit<R, LoreleiGate, Idx>,
+        shares: &GateOutputs<LoreleiShareVec<R>>,
+        circuit: &ExecutableCircuit<R, LoreleiGate<R>, Idx>,
     ) -> Result<(), Self::Error> {
-        let circ_builder: CircuitBuilder<R, boolean_gmw::LoreleiGate, Idx> =
+        let circ_builder: CircuitBuilder<R, LoreleiGate<R>, Idx> =
             CircuitBuilder::new();
         let old = circ_builder.install();
         let total_inputs: usize = circuit
@@ -96,10 +96,10 @@ where
                 .collect()
         };
 
-        let setup_data_circ: ExecutableCircuit<bool, boolean_gmw::BooleanGate, Idx> =
+        let setup_data_circ: ExecutableCircuit<R, LoreleiGate, Idx> =
             ExecutableCircuit::DynLayers(CircuitBuilder::global_into_circuit());
         old.install();
-        let mut executor: Executor<BooleanGmw, Idx> =
+        let mut executor: Executor<Lorelei, Idx> =
             Executor::new(&setup_data_circ, self.party_id, &mut self.mt_provider)
                 .await
                 .expect("Executor::new in AbySetupProvider");
@@ -119,21 +119,21 @@ where
             .interactive_iter()
             .zip(setup_outputs)
             .map(|((gate, _gate_id), setup_out)| match gate {
-                BooleanGate::And { .. } => {
+                ArithmeticGate::Mul { n: u8 } => {
                     let shares = setup_out
                         .into_iter()
                         .map(|out_id| executor_gate_outputs.get(out_id.as_usize()))
                         .collect();
-                    EvalShares { shares }
+                    DeltaShares { shares }
                 }
                 _ => unreachable!(),
             })
             .collect();
-        self.setup_data = Some(SetupData::from_raw(eval_shares));
+        self.setup_data = Some(DeltaShareData::from_raw(eval_shares));
         Ok(())
     }
 
-    async fn request_setup_output(&mut self, count: usize) -> Result<SetupData, Self::Error> {
+    async fn request_setup_output(&mut self, count: usize) -> Result<DeltaShareData<R>, Self::Error> {
         Ok(self
             .setup_data
             .as_mut()
@@ -165,12 +165,12 @@ pub struct BlindedSharingContext {
 impl<R: Ring> Protocol for Lorelei<R> {
     const SIMD_SUPPORT: bool = false;
     type Plain = R;
-    type Share = BlindedShare;
+    type Share = LoreleiShare<R>;
     type Msg = Msg;
     type SimdMsg = ();
-    type Gate = BlindedGate;
+    type Gate = LoreleiGate<R>;
     type Wire = ();
-    type ShareStorage = BlindedShareVec<R>;
+    type ShareStorage = LoreleiShareVec<R>;
     type SetupStorage = DeltaShareData<R>;
 
     fn share_constant(
@@ -215,7 +215,7 @@ impl<R: Ring> Protocol for Lorelei<R> {
     fn compute_msg(
         &self,
         party_id: usize,
-        interactive_gates: impl Iterator<Item = BlindedGate>,
+        interactive_gates: impl Iterator<Item = LoreleiGate>,
         gate_outputs: impl Iterator<Item = Self::Share>,
         mut inputs: impl Iterator<Item = Self::Share>,
         preprocessing_data: &mut Self::SetupStorage,
@@ -227,7 +227,7 @@ impl<R: Ring> Protocol for Lorelei<R> {
     fn evaluate_interactive(
         &self,
         _party_id: usize,
-        _interactive_gates: impl Iterator<Item = BlindedGate>,
+        _interactive_gates: impl Iterator<Item = LoreleiGate>,
         gate_outputs: impl Iterator<Item = Self::Share>,
         Msg::Delta { delta }: Self::Msg,
         Msg::Delta { delta: other_delta }: Self::Msg,
@@ -302,6 +302,42 @@ pub struct LoreleiShare<R> {
     pub(crate) a: ArithmeticShare<R>
 }
 
+impl<R> Share for LoreleiShare<R> {
+
+}
+
+
+#[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
+pub struct LoreleiShareVec<R: Ring> {
+    pub(crate) b: Vec<BlindedShare<R>>,
+    pub(crate) a: Vec<ArithmeticShare<R>>
+}
+
+impl<R: Ring> ShareStorage<Share> for LoreleiShareVec<R> {
+    fn len(&self) -> usize {
+        max(self.a.len(),self.b.len())
+    }
+
+    fn repeat(val: Share, len: usize) -> Self {
+        Self {
+            private: BitVec::repeat(val.private, len),
+            public: BitVec::repeat(val.public, len),
+        }
+    }
+
+    fn set(&mut self, idx: usize, val: Share) {
+        self.public.set(idx, val.public);
+        self.private.set(idx, val.private);
+    }
+
+    fn get(&self, idx: usize) -> Share {
+        Share {
+            public: self.public[idx],
+            private: self.private[idx],
+        }
+    }
+}
+
 
 #[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
 pub struct BlindedShare<R: Ring> {
@@ -341,6 +377,51 @@ pub enum LoreleiGate<R> {
     Arith(ArithmeticGate<R>),
     Conv(ConvGate),
 }
+
+
+impl<R: Ring>  Gate<R> for LoreleiGate<R> {
+    type DimTy = ScalarDim;
+
+    fn is_interactive(&self) -> bool {
+        match &self {
+            LoreleiGate::Base(g) => { g.is_interactive()
+            }
+            LoreleiGate::Arith(g) => {g.is_interactive()
+            }
+            LoreleiGate::Conv(g) => { g.is_interactive()
+            }
+
+        }
+    }
+
+    fn input_size(&self) -> usize {
+        match self {
+            ArithmeticGate::Base(base_gate) => base_gate.input_size(),
+            ArithmeticGate::Mul { n } => *n as usize,
+            ArithmeticGate::Add { n } => *n as usize,
+        }
+    }
+
+    fn as_base_gate(&self) -> Option<&BaseGate<R>> {
+        match self {
+            ArithmeticGate::Base(base_gate) => Some(base_gate),
+            _ => None,
+        }
+    }
+
+    fn wrap_base_gate(base_gate: BaseGate<R, Self::DimTy>) -> Self {
+        Self::Base(base_gate)
+    }
+}
+
+
+impl<R> From<BaseGate<R>> for LoreleiGate<R> {
+    fn from(base_gate: BaseGate<R>) -> Self {
+        LoreleiGate::Base(base_gate)
+    }
+}
+
+
 
 // Gate Mode
 
