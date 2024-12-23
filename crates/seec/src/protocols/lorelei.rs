@@ -25,6 +25,7 @@ use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::Debug;
 use std::ops::Not;
+use std::cmp;
 
 
 
@@ -315,25 +316,25 @@ pub struct LoreleiShareVec<R: Ring> {
 
 impl<R: Ring> ShareStorage<Share> for LoreleiShareVec<R> {
     fn len(&self) -> usize {
-        max(self.a.len(),self.b.len())
+        cmp::max(self.a.len(),self.b.len())
     }
 
     fn repeat(val: Share, len: usize) -> Self {
         Self {
-            private: BitVec::repeat(val.private, len),
-            public: BitVec::repeat(val.public, len),
+            a: BitVec::repeat(val.a, len),
+            b: BitVec::repeat(val.b, len),
         }
     }
 
     fn set(&mut self, idx: usize, val: Share) {
-        self.public.set(idx, val.public);
-        self.private.set(idx, val.private);
+        self.a.set(idx, val.a);
+        self.b.set(idx, val.b);
     }
 
     fn get(&self, idx: usize) -> Share {
-        Share {
-            public: self.public[idx],
-            private: self.private[idx],
+        LoreleiShare {
+            a: self.a[idx],
+            b: self.b[idx],
         }
     }
 }
