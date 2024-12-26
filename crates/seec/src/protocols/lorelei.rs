@@ -464,7 +464,7 @@ mod tests {
         let i2 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
         let i3 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
         let a = circuit.add_wired_gate(LG::Mult { n: 3 }, &[i0, i1, i2]);
-        let reshare = arith2blinded(&mut c, a);
+        let reshare = arith2blinded(&mut circuit, a);
         let b = circuit.add_wired_gate(LG::Mult { n: 2 }, &[reshare, i3]);
         let _out = circuit.add_wired_gate(LG::Base(BaseGate::Output(ScalarDim)), &[b]);
         let circuit = ExecutableCircuit::DynLayers(circuit.into());
