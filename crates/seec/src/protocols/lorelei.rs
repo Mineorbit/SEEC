@@ -187,15 +187,30 @@ impl<R: Ring> Protocol for Lorelei<R> {
             },
             BlindedGate::Conv(conv) => 
             {
+                // todo, somehow this does not work, not sure why
+                //assert_eq(inputs.len(),1);
                 match conv {
                     Blinded2Arithmetic => {
+                        let input = inputs.next();
+                        assert!(matches!(input,LoreleiShare::Blinded(_)));
+                        match input 
+                        {
+                            LoreleiShare::Blinded(blindedShare) => 
+                            {
+                                let outShareValue = blindedShare.l;
+                                if party_id == 0
+                                {
+                                    outShareValue.wrapping_add(blindedShare.m);
+                                }
 
-                    }
+                                LoreleiShare::Arithmetic(ArithmeticShare {x: outShareValue})
+                            }
+                        }
+                    },
                     Arithmetic2Blinded => {
-
+                        panic!("Called evaluate_non_interactive on Arithmetic to blinded reshare gate")
                     }
                 }
-                panic!("Called evaluate_non_interactive on Gate::Mul")
             }
         }
     }
