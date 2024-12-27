@@ -115,13 +115,16 @@ impl<R: Ring> Protocol for Lorelei<R> {
         output_share: Self::Share,
         val: Self::Plain,
     ) -> Self::Share {
-        Self::Share {
-            a: ArithmeticShare {
-                x: val
-            },
-            b: BlindedShare{
-                m: val,
-                l: R::ZERO,
+        match output_share {
+            LoreleiShare::Arithmetic(arithShare) => {
+                arithShare.x = val;
+                output_share
+            }
+
+            LoreleiShare::Blinded(blindedShare) => {
+                blindedShare.m = val;
+                blindedShare.l = R::ZERO;
+                output_share
             }
         }
     }
@@ -137,48 +140,71 @@ impl<R: Ring> Protocol for Lorelei<R> {
             
             BlindedGate::Arith(arith) => 
             {
-                match arith {
-                    ArithmeticGate::Mul {n} => {
+                let outputShare = LoreleiShare::default();
 
+                match arith {
+                    // TODO should assert that all input shares are completely blinded or completely arithmetic
+                
+                    ArithmeticGate::Mul {n} => {
+                        for input in inputs {
+
+                        }
                     }
                     ArithmeticGate::Add {n} => {
-                        
+                        match inputs[0] 
+                        {
+                            LoreleiShare::Blinded(arithmeticInput) => {
+
+                            }
+                            LoreleiShare::Blinded(blindedInput) => {
+                                
+                            }
+                        }
+
                     }
                 }
             },
+            BlindedGate::Conv(conv) => 
+            {
+                match conv {
+                    Blinded2Arithmetic => {
+
+                    }
+                    Arithmetic2Blinded => {
+
+                    }
+                }
+                panic!("Called evaluate_non_interactive on Gate::Mul")
+            }
         }
     }
 
-    // on conv gate and input output do something else not
-    fn compute_msg(
-        &self,
-        party_id: usize,
-        interactive_gates: impl Iterator<Item = LoreleiGate<R>>,
-        gate_outputs: impl Iterator<Item = Self::Share>,
-        mut inputs: impl Iterator<Item = Self::Share>,
-        preprocessing_data: &mut Self::SetupStorage,
-    ) -> Self::Msg {
-        assert!(false)
+    // on conv gate send the necessary randomly offset arithmetic shares of the m value
+    fn compute_msg( &self, party_id: usize, interactive_gates: impl Iterator<Item = LoreleiGate<R>>, gate_outputs: impl Iterator<Item = Self::Share>, mut inputs: impl Iterator<Item = Self::Share>, preprocessing_data: &mut Self::SetupStorage, ) -> Self::Msg 
+    {        
+        let m: Vec<R> = interactive_gates
+        .zip(gate_outputs)
+        .map(|(gate, output)| {
+            assert!(matches!(gate, ConvGate::Arithmetic2Blinded));
+            let inputs = inputs.by_ref().take(gate.input_size());
+            gate.compute_delta_share(party_id, inputs, preprocessing_data, output)
+        }).collect();
+    Msg::Delta { m }
     }
 
-    // on conv gate and input output do something else not
-    fn evaluate_interactive(
-        &self,
-        _party_id: usize,
-        _interactive_gates: impl Iterator<Item = LoreleiGate<R>>,
-        gate_outputs: impl Iterator<Item = Self::Share>,
-        Msg::Delta { delta }: Self::Msg,
-        Msg::Delta { delta: other_delta }: Self::Msg,
-        _preprocessing_data: &mut Self::SetupStorage,
-    ) -> Self::ShareStorage {
-        assert!(false)
+    // on arith 2 blinded conv gate, add together my arithmetic share of m with other arithmetic share
+    fn evaluate_interactive(&self, _party_id: usize, _interactive_gates: impl Iterator<Item = LoreleiGate<R>>, gate_outputs: impl Iterator<Item = Self::Share>, Msg::Delta { m_arith }: Self::Msg, Msg::Delta { delta: other_m_arith }: Self::Msg, _preprocessing_data: &mut Self::SetupStorage,) -> Self::ShareStorage 
+    {
+        gate_outputs
+            .zip(m_arith).zip(other_m_arith)
+            .map(|((mut out_share, my_m_arith), other_m_arith)| {
+                out_share.m = my_m_arith.wrapping_add(&other_m_arith);
+                out_share
+            }).collect()
     }
 
-    fn setup_gate_outputs<Idx: GateIdx>(
-        &mut self,
-        _party_id: usize,
-        circuit: &ExecutableCircuit<Self::Plain, Self::Gate, Idx>,
-    ) -> GateOutputs<Self::ShareStorage> {
+    fn setup_gate_outputs<Idx: GateIdx>(&mut self, _party_id: usize, circuit: &ExecutableCircuit<Self::Plain, Self::Gate, Idx>,) -> GateOutputs<Self::ShareStorage> 
+    {
         assert!(false);
     }
 }
@@ -233,13 +259,6 @@ impl<R: Ring> SetupStorage for DeltaShareData<R> {
 
 // Computation (Online Shares)
 
-/*
-#[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct LoreleiShare<R: Ring> {
-    pub(crate) b: BlindedShare<R>,
-    pub(crate) a: ArithmeticShare<R>
-}
-*/
 #[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub enum LoreleiShare<R: Ring> {
     Arithmetic(ArithmeticShare<R>),
@@ -258,39 +277,6 @@ impl<R: Ring> Share for LoreleiShare<R> {
     type SimdShare = ShareStorage<LoreleiShare<R>>;
 }
 
-/*
-
-#[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
-pub struct LoreleiShareVec<R: Ring> {
-    pub(crate) b: Vec<BlindedShare<R>>,
-    pub(crate) a: Vec<ArithmeticShare<R>>
-}
-
-impl<R: Ring> ShareStorage<LoreleiShare<R>> for LoreleiShareVec<R> {
-    fn len(&self) -> usize {
-        cmp::max(self.a.len(),self.b.len())
-    }
-
-    fn repeat(val: Share, len: usize) -> Self {
-        Self {
-            a: BitVec::repeat(val.a, len),
-            b: BitVec::repeat(val.b, len),
-        }
-    }
-
-    fn set(&mut self, idx: usize, val: Share) {
-        self.a.set(idx, val.a);
-        self.b.set(idx, val.b);
-    }
-
-    fn get(&self, idx: usize) -> Share {
-        LoreleiShare {
-            a: self.a[idx],
-            b: self.b[idx],
-        }
-    }
-}
-*/
 
 #[derive(Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq, Debug, Default)]
 pub struct BlindedShare<R: Ring> {
@@ -332,7 +318,6 @@ impl<R: Ring>  Gate<R> for LoreleiGate<R> {
             }
             LoreleiGate::Conv(g) => { g.is_interactive()
             }
-
         }
     }
 
