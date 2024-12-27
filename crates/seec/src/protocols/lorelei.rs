@@ -140,27 +140,48 @@ impl<R: Ring> Protocol for Lorelei<R> {
             
             BlindedGate::Arith(arith) => 
             {
-                let outputShare = LoreleiShare::default();
 
+                // TODO should assert that all input shares are completely blinded or completely arithmetic
                 match arith {
-                    // TODO should assert that all input shares are completely blinded or completely arithmetic
                 
-                    ArithmeticGate::Mul {n} => {
-                        for input in inputs {
-
-                        }
-                    }
                     ArithmeticGate::Add {n} => {
-                        match inputs[0] 
-                        {
-                            LoreleiShare::Blinded(arithmeticInput) => {
+                        let arithmeticMode = false;
+                        let sumMask = R::ZERO;
 
-                            }
-                            LoreleiShare::Blinded(blindedInput) => {
-                                
+                        let sumLambda = R::ZERO;
+
+                        let sumShare = R::ZERO;
+                        while let Some(currentInput) = inputs.next()
+                        {
+                            match currentInput {
+                                LoreleiShare::Arithmetic(arithmeticShare) => {
+                                    arithmeticMode = true;
+                                    sumShare.wrapping_add(&arithmeticShare.x);
+                                }
+                                LoreleiShare::Blinded(blindedShare) => {
+                                    arithmeticMode = false;
+                                    sumMask.wrapping_add(&blindedShare.m);
+                                    sumLambda.wrapping_add(&blindedShare.l);
+                                }
                             }
                         }
+                        if arithmeticMode
+                        {
+                            LoreleiShare::Arithmetic(ArithmeticShare {x: sumShare})
+                        } else
+                        {
+                            LoreleiShare::Blinded (BlindedShare {m: sumMask, l:sumLambda})
+                        }
 
+                    }
+
+                    
+                    ArithmeticGate::Mul {n} => {
+                        let outShareValue = R::ZERO;
+
+                        // TODO: Sum for each posetof gamma values and mask values
+
+                        LoreleiShare::Arithmetic(ArithmeticShare {x: outShareValue})
                     }
                 }
             },
@@ -185,7 +206,7 @@ impl<R: Ring> Protocol for Lorelei<R> {
         let m: Vec<R> = interactive_gates
         .zip(gate_outputs)
         .map(|(gate, output)| {
-            assert!(matches!(gate, ConvGate::Arithmetic2Blinded));
+            assert!(matches!(gate, LoreleiGate::Conv(ConvGate::Arithmetic2Blinded)));
             let inputs = inputs.by_ref().take(gate.input_size());
             gate.compute_delta_share(party_id, inputs, preprocessing_data, output)
         }).collect();
@@ -425,6 +446,13 @@ impl<R> From<BaseGate<R>> for ArithmeticGate<R> {
         ArithmeticGate::Base(base_gate)
     }
 }
+
+
+
+
+
+
+
 
 
 
