@@ -122,7 +122,15 @@ impl<R: Ring> Protocol for Lorelei<R> {
             }
 
             LoreleiShare::Blinded(blindedShare) => {
-                blindedShare.m = val;
+                let is_active: Ring;
+                if  _party_id == 0
+                {
+                    is_active = R::ONE;
+                }else
+                {
+                    is_active = R::ZERO;
+                }
+                blindedShare.m =  is_active.wrapping_mul(val);
                 blindedShare.l = R::ZERO;
                 output_share
             }
@@ -191,8 +199,8 @@ impl<R: Ring> Protocol for Lorelei<R> {
                 //assert_eq(inputs.len(),1);
                 match conv {
                     Blinded2Arithmetic => {
-                        let input = inputs.next();
-                        assert!(matches!(input,LoreleiShare::Blinded(_)));
+                        let input = inputs.next().unwrap();
+                        assert!(matches!(input,LoreleiShare::Blinded(BlindedShare)));
                         match input 
                         {
                             LoreleiShare::Blinded(blindedShare) => 
@@ -200,7 +208,7 @@ impl<R: Ring> Protocol for Lorelei<R> {
                                 let outShareValue = blindedShare.l;
                                 if party_id == 0
                                 {
-                                    outShareValue.wrapping_add(blindedShare.m);
+                                    outShareValue.wrapping_add(&blindedShare.m);
                                 }
 
                                 LoreleiShare::Arithmetic(ArithmeticShare {x: outShareValue})
@@ -303,7 +311,7 @@ pub enum LoreleiShare<R: Ring> {
 
 impl<R: Ring> Default for LoreleiShare<R> {
     fn default() -> Self {
-        LoreleiShare::Arithmetic(ArithmeticShare::default()) // Specify the default variant and its values
+        LoreleiShare::Arithmetic(BlindedShare::default()) // Specify the default variant and its values
     }
 }
 
@@ -491,9 +499,9 @@ mod tests {
         let i1 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
         let i2 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
         let i3 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
-        let a = circuit.add_wired_gate(LG::Mult { n: 3 }, &[i0, i1, i2]);
-        let reshare = arith2blinded(&mut circuit, a);
-        let b = circuit.add_wired_gate(LG::Mult { n: 2 }, &[reshare, i3]);
+        let a = circuit.add_wired_gate(LG::Arith(Mult { n: 3 }, &[i0, i1, i2]));
+        let reshare = circuit.add_wired_gate(LG::Conv(Arithmetic2Blinded,&[a]));
+        let b = circuit.add_wired_gate(LG::Arith(Mult { n: 2 }, &[reshare, i3]));
         let _out = circuit.add_wired_gate(LG::Base(BaseGate::Output(ScalarDim)), &[b]);
         let circuit = ExecutableCircuit::DynLayers(circuit.into());
 
@@ -505,10 +513,7 @@ mod tests {
             TestChannel::InMemory,
         )
         .await?;
-        let mut exp = BitVec::from_element(8);
-        exp.truncate(32);
-        let exp = MixedShareStorage::Bool(exp);
-        assert_eq!(out, exp);
+        assert_eq!(out[], 16);
         Ok(())
     }
 }
