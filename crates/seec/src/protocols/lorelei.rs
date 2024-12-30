@@ -472,8 +472,152 @@ impl<R> From<BaseGate<R>> for ArithmeticGate<R> {
 
 
 
+/*
+
+let mut delta_shares = priv_delta.shares;
+                // reverse so we go from those delta shares compute by larger sets from powerset
+                // to smaller, so we can extend with the individual shares
+                delta_shares.reverse();
+                delta_shares.extend(inputs.iter().rev().map(|s| s.private));
+                let mut inp_pset: Vec<_> = inputs
+                    .into_iter()
+                    .powerset()
+                    .map(|pset| pset.iter().fold(true, |acc, a| acc & a.public))
+                    .collect();
+                // last element is product of all public values
+                let mul_plain = inp_pset.pop().expect("Missing inputs");
+                assert_eq!(inp_pset.len(), delta_shares.len());
+                let intermediate = inp_pset
+                    .into_iter()
+                    .zip(delta_shares)
+                    .fold(true, |acc, (public_pset, delta)| acc & public_pset & delta);
+                (party_id == 1) & mul_plain ^ intermediate
+
+*/
 
 
+
+// custom gate behavior
+impl LoreleiGate {
+    /// output_share contains the previously randomly generated private share needed for the
+    /// evaluation
+    fn compute_delta_share(
+        &self,
+        party_id: usize,
+        mut inputs: impl Iterator<Item = Share>,
+        preprocessing_data: &mut SetupData,
+        output_share: Share,
+    ) -> bool {
+        assert!(matches!(party_id, 0 | 1));
+        assert!(matches!(self, LoreleiGate::Conv( { .. })));
+        let mut priv_delta = preprocessing_data
+            .eval_shares
+            .pop()
+            .expect("Missing eval_shares");
+        match self {
+            &LoreleiGate::Conv(convGate) => {
+                let inputs: Vec<_> = inputs.take(n as usize).collect();
+                inputs[0] output_share.private
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn setup_output_share(
+        &self,
+        mut inputs: impl Iterator<Item = Share>,
+        mut rng: impl Rng,
+    ) -> Share {
+        match self {
+            BooleanGate::Base(base_gate) => match base_gate {
+                BaseGate::Input(_) => {
+                    // TODO this needs to randomly generate the private part of the share
+                    //  however, there is a problem. This private part needs to match the private
+                    //  part of the input which is supplied to Executor::execute
+                    //  one option to ensure this would be to use two PRNGs seeded with the same
+                    //  seed for this method and for the Sharing of the input
+                    //  Or maybe the setup gate outputs of the input gates can be passed to
+                    //  the share() method?
+                    Share {
+                        public: Default::default(),
+                        private: rng.gen(),
+                    }
+                }
+                BaseGate::Output(_)
+                | BaseGate::SubCircuitInput(_)
+                | BaseGate::SubCircuitOutput(_)
+                | BaseGate::ConnectToMain(_)
+                | BaseGate::Debug
+                | BaseGate::Identity => inputs.next().expect("Empty input"),
+                BaseGate::Constant(_) => Share::default(),
+                BaseGate::ConnectToMainFromSimd(_) => {
+                    unimplemented!("SIMD currently not supported for ABY2")
+                }
+            },
+            BooleanGate::And { .. } => {
+                // input is not actually needed at this stage
+                Share {
+                    private: rng.gen(),
+                    public: Default::default(),
+                }
+            }
+            BooleanGate::Xor => {
+                let mut a = inputs.next().expect("Empty input");
+                let b = inputs.next().expect("Empty input");
+                // it's only necessary to XOR the private part
+                a.private ^= b.private;
+                a
+            }
+            BooleanGate::Inv => {
+                // private share part does not change for Inv gates
+                inputs.next().expect("Empty input")
+            }
+        }
+    }
+
+    fn setup_data_circ<'a, Idx: GateIdx>(
+        &self,
+        input_shares: impl Iterator<Item = &'a Secret<BooleanGmw, Idx>>,
+        setup_sub_circ_cache: &mut AHashMap<Vec<Secret<BooleanGmw, Idx>>, Secret<BooleanGmw, Idx>>,
+    ) -> Vec<Secret<BooleanGmw, Idx>> {
+        let &BooleanGate::And { n } = self else {
+            assert!(self.is_non_interactive(), "Unhandled interactive gate");
+            panic!("Called setup_data_circ on non_interactive gate")
+        };
+        let inputs = n as usize;
+
+        // skip the empty and single elem sets
+        let inputs_pset = input_shares
+            .take(inputs)
+            .cloned()
+            .powerset()
+            .skip(inputs + 1);
+
+        inputs_pset
+            .map(|set| match setup_sub_circ_cache.get(&set) {
+                None => match &set[..] {
+                    [] => unreachable!("Empty set is filtered"),
+                    [a, b] => {
+                        let sh = a.clone() & b;
+                        setup_sub_circ_cache.insert(set, sh.clone());
+                        sh
+                    }
+                    [processed_subset @ .., last] => {
+                        assert!(processed_subset.len() >= 2, "Smaller sets are filtered");
+                        // We know we generated the mul triple for the smaller subset
+                        let subset_out = setup_sub_circ_cache
+                            .get(processed_subset)
+                            .expect("Subset not present in cache");
+                        let sh = last.clone() & subset_out;
+                        setup_sub_circ_cache.insert(set, sh.clone());
+                        sh
+                    }
+                },
+                Some(processed_set) => processed_set.clone(),
+            })
+            .collect()
+    }
+}
 
 
 
