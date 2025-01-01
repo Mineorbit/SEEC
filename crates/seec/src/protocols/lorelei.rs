@@ -26,7 +26,7 @@ use std::error::Error;
 use std::fmt::Debug;
 use std::ops::Not;
 use std::cmp;
-
+use std::cmp::Ordering;
 
 
 // 2 party OT based setup provider
@@ -34,16 +34,34 @@ use std::cmp;
 
 pub type LoreleiSetupMsg<R> = executor::Message<Lorelei<R>>;
 
-pub struct LoreleiSetupProvider<Mtp,R: Ring> {
+// this maps a gate to a list of its shares of blinding values: the first element of the image is potential gamma shares, i.e. crossterms, the latter output shares
+pub type SetupLookup<R> = HashMap<GateIdx,(Vec<R>,R)>;
+
+#[derive(Clone, Debug, Hash,PartialEq,Eq,PartialOrd,Ord)]
+pub struct LoreleiSharing<R> {
+    pub(crate) lookup: SetupLookup<R>
+    // TODO: Maybe give access to rngs here like in aby2.0 implementation
+}
+
+impl<R> Default for LoreleiSharing<R> {
+    fn default() -> Self {
+        Self {
+            lookup: HashMap::new()
+        }
+    }
+}
+
+
+pub struct LoreleiSetupProvider<'a,Mtp,R: Ring> {
     party_id: usize,
     mt_provider: Mtp,
     sender: seec_channel::Sender<LoreleiSetupMsg<R>>,
     receiver: seec_channel::Receiver<LoreleiSetupMsg<R>>,
-    setup_data: Option<DeltaShareData<R>>,
+    sharing: &'a LoreleiSharing<R>
 }
 
 #[async_trait]
-impl<MtpErr, Mtp, Idx, R: Ring> FunctionDependentSetup<Lorelei<R>, Idx> for LoreleiSetupProvider<Mtp,R>
+impl<'a,MtpErr, Mtp, Idx, R: Ring> FunctionDependentSetup<Lorelei<R>, Idx> for LoreleiSetupProvider<'a,Mtp,R>
 where
     MtpErr: Error + Send + Sync + Debug + 'static,
     Mtp: MTProvider<Output = MulTriples, Error = MtpErr> + Send,
@@ -56,44 +74,48 @@ where
         shares: &GateOutputs<ShareStorage<LoreleiShare<R>>>,
         circuit: &ExecutableCircuit<R, LoreleiGate<R>, Idx>,
     ) -> Result<(), Self::Error> {
-        // TODO: redo from aby boolean example but with rolled in structure
-
-        
-        //self.setup_data = Some(DeltaShareData::from_raw(eval_shares));
+        // TODO: populate sharing with lambda and gamma values
         Ok(())
     }
 
-    async fn request_setup_output(&mut self, count: usize) -> Result<DeltaShareData<R>, Self::Error> {
-        Ok(self
-            .setup_data
-            .as_mut()
-            .expect("setup must be called before request_setup_output")
-            .split_off_last(count))
+    // these values end up being the setup data being passed to the protocol context in older implementations, we move this to the protocol struct instead, to allow for easier access, the outputs of this function will be ignored therefore
+    async fn request_setup_output(&mut self, count: usize) -> Result<R, Self::Error> {
+        Ok(R::ZERO)
     }
 }
 
 
 
-// -----  ring Lorelei combined arithmetic and blinded protocol
+impl<'a,Mtp,R: Ring> LoreleiSetupProvider<'a,Mtp,R> {
+    pub fn new(
+        party_id: usize,
+        mt_provider: Mtp,
+        sender: seec_channel::Sender<LoreleiSetupMsg<R>>,
+        receiver: seec_channel::Receiver<LoreleiSetupMsg<R>>,
+        sharing: &'a LoreleiSharing<R> 
+    ) -> Self {
+        Self {
+            party_id,
+            mt_provider,
+            sender,
+            receiver,
+            sharing
+        }
+    }
+}
+
+// -----  ring Lorelei protocol = combined arithmetic and blinded protocol
 
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Hash,PartialEq,PartialOrd,Eq,Ord)]
 pub struct Lorelei<R: Ring> {
-    delta_sharing_state: BlindedSharingContext,
-    _p: PhantomData<R>
+    sharing: LoreleiSharing<R>
 }
 
-#[derive(Clone, Debug)]
-pub struct BlindedSharingContext {
-    pub(crate) private_rng: ChaChaRng,
-    pub(crate) local_joint_rng: ChaChaRng,
-    pub(crate) remote_joint_rng: ChaChaRng,
-}
 
-impl Default for BlindedSharingContext {
-    fn default() -> Self {
-        todo!()
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Msg<R> {
+    Delta { delta: Vec<R> },
 }
 
 
@@ -102,12 +124,12 @@ impl<R: Ring> Protocol for Lorelei<R> {
     const SIMD_SUPPORT: bool = false;
     type Plain = R;
     type Share = LoreleiShare<R>;
-    type Msg = Msg;
+    type Msg = Msg<R>;
     type SimdMsg = ();
     type Gate = LoreleiGate<R>;
     type Wire = ();
     type ShareStorage = ShareStorage<LoreleiShare<R>>;
-    type SetupStorage = DeltaShareData<R>;
+    type SetupStorage = SetupStorage;
 
     fn share_constant(
         &self,
@@ -178,7 +200,7 @@ impl<R: Ring> Protocol for Lorelei<R> {
                             LoreleiShare::Arithmetic(ArithmeticShare {x: sumShare})
                         } else
                         {
-                            LoreleiShare::Blinded (BlindedShare {m: sumMask, l:sumLambda})
+                            LoreleiShare::Blinded(BlindedShare {m: sumMask, l:sumLambda})
                         }
 
                     }
@@ -224,27 +246,28 @@ impl<R: Ring> Protocol for Lorelei<R> {
     }
 
     // on conv gate send the necessary randomly offset arithmetic shares of the m value
-    fn compute_msg( &self, party_id: usize, interactive_gates: impl Iterator<Item = LoreleiGate<R>>, gate_outputs: impl Iterator<Item = Self::Share>, mut inputs: impl Iterator<Item = Self::Share>, preprocessing_data: &mut Self::SetupStorage, ) -> Self::Msg 
+    fn compute_msg( &self, party_id: usize, interactive_gates: impl Iterator<Item = LoreleiGate<R>>, gate_outputs: impl Iterator<Item = Self::Share>, mut inputs: impl Iterator<Item = Self::Share>, _old_setup_store_var: Self::SetupStorage) -> Self::Msg 
     {        
         let m: Vec<R> = interactive_gates
         .zip(gate_outputs)
         .map(|(gate, output)| {
             assert!(matches!(gate, LoreleiGate::Conv(ConvGate::Arithmetic2Blinded)));
             let inputs = inputs.by_ref().take(gate.input_size());
-            gate.compute_delta_share(party_id, inputs, preprocessing_data, output)
+            gate.compute_delta_share(party_id, inputs, output)
         }).collect();
-    Msg::Delta { m }
+    Msg::Delta { delta: m }
     }
 
-    // on arith 2 blinded conv gate, add together my arithmetic share of m with other arithmetic share
-    fn evaluate_interactive(&self, _party_id: usize, _interactive_gates: impl Iterator<Item = LoreleiGate<R>>, gate_outputs: impl Iterator<Item = Self::Share>, Msg::Delta { m_arith }: Self::Msg, Msg::Delta { delta: other_m_arith }: Self::Msg, _preprocessing_data: &mut Self::SetupStorage,) -> Self::ShareStorage 
+    // on arith 2 blinded conv gate, add together my arithmetic share of m with other arithmetic share, add together into blinded share
+    fn evaluate_interactive(&self, _party_id: usize, interactive_gates: impl Iterator<Item = LoreleiGate<R>>, gate_outputs: impl Iterator<Item = Self::Share>, Msg::Delta { delta: m_arith }: Self::Msg, Msg::Delta { delta: other_m_arith }: Self::Msg, _old_setup_store_var: Self::SetupStorage) -> Self::ShareStorage 
     {
-        gate_outputs
+        
+        let intermediate = gate_outputs
             .zip(m_arith).zip(other_m_arith)
-            .map(|((mut out_share, my_m_arith), other_m_arith)| {
-                out_share.m = my_m_arith.wrapping_add(&other_m_arith);
+            .map(|((mut out_share, my_delta), other_delta)| {
+                out_share = LoreleiShare::Blinded(BlindedShare{m:(my_delta.wrapping_add(&other_delta)),l:R::ZERO});
                 out_share
-            }).collect()
+            }).collect();
     }
 
     fn setup_gate_outputs<Idx: GateIdx>(&mut self, _party_id: usize, circuit: &ExecutableCircuit<Self::Plain, Self::Gate, Idx>,) -> GateOutputs<Self::ShareStorage> 
@@ -254,51 +277,10 @@ impl<R: Ring> Protocol for Lorelei<R> {
 }
 
 
-
-
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Msg {
-    Delta { delta: Vec<u8> },
-}
-
-
-
-
 // ---- Sharing structure
 
 
-// Setup (Offline Shares)
 
-#[derive(Clone, Default)]
-pub struct DeltaShareData<R> {
-    eval_shares: Vec<DeltaShares<R>>,
-}
-
-#[derive(Clone)]
-pub struct DeltaShares<R> {
-    shares: Vec<R>,
-}
-
-
-impl<R: Ring> SetupStorage for DeltaShareData<R> {
-    fn len(&self) -> usize {
-        self.eval_shares.len()
-    }
-
-    fn split_off_last(&mut self, count: usize) -> Self {
-        Self {
-            eval_shares: self.eval_shares.split_off(self.len() - count),
-        }
-    }
-    fn reserve(&mut self, additional: usize) {
-        self.eval_shares.reserve(additional);
-    }
-
-    fn append(&mut self, mut other: Self) {
-        self.eval_shares.append(&mut other.eval_shares);
-    }
-}
 
 
 // Computation (Online Shares)
@@ -311,7 +293,7 @@ pub enum LoreleiShare<R: Ring> {
 
 impl<R: Ring> Default for LoreleiShare<R> {
     fn default() -> Self {
-        LoreleiShare::Arithmetic(BlindedShare::default()) // Specify the default variant and its values
+        LoreleiShare::Blinded(BlindedShare::default()) // Specify the default variant and its values
     }
 }
 
@@ -472,64 +454,46 @@ impl<R> From<BaseGate<R>> for ArithmeticGate<R> {
 
 
 
-/*
-
-let mut delta_shares = priv_delta.shares;
-                // reverse so we go from those delta shares compute by larger sets from powerset
-                // to smaller, so we can extend with the individual shares
-                delta_shares.reverse();
-                delta_shares.extend(inputs.iter().rev().map(|s| s.private));
-                let mut inp_pset: Vec<_> = inputs
-                    .into_iter()
-                    .powerset()
-                    .map(|pset| pset.iter().fold(true, |acc, a| acc & a.public))
-                    .collect();
-                // last element is product of all public values
-                let mul_plain = inp_pset.pop().expect("Missing inputs");
-                assert_eq!(inp_pset.len(), delta_shares.len());
-                let intermediate = inp_pset
-                    .into_iter()
-                    .zip(delta_shares)
-                    .fold(true, |acc, (public_pset, delta)| acc & public_pset & delta);
-                (party_id == 1) & mul_plain ^ intermediate
-
-*/
 
 
 
 // custom gate behavior
-impl LoreleiGate {
+impl<R: Ring> LoreleiGate<R> {
     /// output_share contains the previously randomly generated private share needed for the
     /// evaluation
     fn compute_delta_share(
         &self,
         party_id: usize,
         mut inputs: impl Iterator<Item = Share>,
-        preprocessing_data: &mut SetupData,
         output_share: Share,
     ) -> bool {
         assert!(matches!(party_id, 0 | 1));
-        assert!(matches!(self, LoreleiGate::Conv( { .. })));
-        let mut priv_delta = preprocessing_data
-            .eval_shares
-            .pop()
-            .expect("Missing eval_shares");
+        //assert!(matches!(self, LoreleiGate::Conv( { .. })));
         match self {
             &LoreleiGate::Conv(convGate) => {
-                let inputs: Vec<_> = inputs.take(n as usize).collect();
-                inputs[0] output_share.private
+                let inputs: Vec<_> = inputs.take(1).collect();
+                match inputs[0] {
+                    LoreleiShare::Arithmetic(arithShare) => {
+
+                        // <m_x>_i = <x>_i - <lambda_x>_i
+                        arithShare.x.wrapping_sub(output_share.l)
+                    }
+                }
             }
             _ => unreachable!(),
         }
     }
 
+    // this is the lambda functionality
+    // it produces only the lambda values across the entire circuit, note that as multiplications do not have blinded output shares they have no lambda/gamma output
     fn setup_output_share(
         &self,
         mut inputs: impl Iterator<Item = Share>,
         mut rng: impl Rng,
     ) -> Share {
+
         match self {
-            BooleanGate::Base(base_gate) => match base_gate {
+            LoreleiGate::Base(base_gate) => match base_gate {
                 BaseGate::Input(_) => {
                     // TODO this needs to randomly generate the private part of the share
                     //  however, there is a problem. This private part needs to match the private
@@ -538,10 +502,12 @@ impl LoreleiGate {
                     //  seed for this method and for the Sharing of the input
                     //  Or maybe the setup gate outputs of the input gates can be passed to
                     //  the share() method?
-                    Share {
-                        public: Default::default(),
-                        private: rng.gen(),
-                    }
+                    LoreleiShare::Blinded( 
+                        BlindedShare {
+                        m: Default::default(),
+                        l: rng.gen()
+                        }
+                    )
                 }
                 BaseGate::Output(_)
                 | BaseGate::SubCircuitInput(_)
@@ -553,70 +519,44 @@ impl LoreleiGate {
                 BaseGate::ConnectToMainFromSimd(_) => {
                     unimplemented!("SIMD currently not supported for ABY2")
                 }
-            },
-            BooleanGate::And { .. } => {
-                // input is not actually needed at this stage
-                Share {
-                    private: rng.gen(),
-                    public: Default::default(),
-                }
-            }
-            BooleanGate::Xor => {
-                let mut a = inputs.next().expect("Empty input");
-                let b = inputs.next().expect("Empty input");
-                // it's only necessary to XOR the private part
-                a.private ^= b.private;
-                a
-            }
-            BooleanGate::Inv => {
-                // private share part does not change for Inv gates
-                inputs.next().expect("Empty input")
-            }
-        }
-    }
-
-    fn setup_data_circ<'a, Idx: GateIdx>(
-        &self,
-        input_shares: impl Iterator<Item = &'a Secret<BooleanGmw, Idx>>,
-        setup_sub_circ_cache: &mut AHashMap<Vec<Secret<BooleanGmw, Idx>>, Secret<BooleanGmw, Idx>>,
-    ) -> Vec<Secret<BooleanGmw, Idx>> {
-        let &BooleanGate::And { n } = self else {
-            assert!(self.is_non_interactive(), "Unhandled interactive gate");
-            panic!("Called setup_data_circ on non_interactive gate")
-        };
-        let inputs = n as usize;
-
-        // skip the empty and single elem sets
-        let inputs_pset = input_shares
-            .take(inputs)
-            .cloned()
-            .powerset()
-            .skip(inputs + 1);
-
-        inputs_pset
-            .map(|set| match setup_sub_circ_cache.get(&set) {
-                None => match &set[..] {
-                    [] => unreachable!("Empty set is filtered"),
-                    [a, b] => {
-                        let sh = a.clone() & b;
-                        setup_sub_circ_cache.insert(set, sh.clone());
-                        sh
-                    }
-                    [processed_subset @ .., last] => {
-                        assert!(processed_subset.len() >= 2, "Smaller sets are filtered");
-                        // We know we generated the mul triple for the smaller subset
-                        let subset_out = setup_sub_circ_cache
-                            .get(processed_subset)
-                            .expect("Subset not present in cache");
-                        let sh = last.clone() & subset_out;
-                        setup_sub_circ_cache.insert(set, sh.clone());
-                        sh
+                },
+            LoreleiGate::Arith(arithmetic_gate) => match arithmetic_gate {
+                ArithmeticGate::Mul { n } => {
+                    // multiplication never has fresh randomness itself
+                    Share::Default
+                },
+                ArithmeticGate::Add { n } => {
+                    let mut acc = R::ZERO;
+                    
+                    while let Some(currentInput) = inputs.next()
+                        {
+                            match currentInput {
+                                LoreleiShare::Blinded(blindedShare) => {
+                                    acc.wrapping_add(blindedShare.l);
+                                }
+                            }
+                        }
+                        LoreleiShare::Blinded( 
+                            BlindedShare {
+                            m: Default::default(),
+                            l: acc
+                        })
                     }
                 },
-                Some(processed_set) => processed_set.clone(),
-            })
-            .collect()
+            LoreleiGate::Conv(conversion_gate) => match conversion_gate {
+                // here fresh randomness only if it is arithmetic to blinded, else give no randomness
+                Arithmetic2Blinded => {
+                    LoreleiShare::Blinded( 
+                        BlindedShare {
+                        m: Default::default(),
+                        l: rng.gen()
+                    })
+                }
+            }
+        }
+
     }
+
 }
 
 
@@ -647,17 +587,32 @@ mod tests {
         let reshare = circuit.add_wired_gate(LG::Conv(Arithmetic2Blinded,&[a]));
         let b = circuit.add_wired_gate(LG::Arith(Mult { n: 2 }, &[reshare, i3]));
         let _out = circuit.add_wired_gate(LG::Base(BaseGate::Output(ScalarDim)), &[b]);
-        let circuit = ExecutableCircuit::DynLayers(circuit.into());
+        let c = ExecutableCircuit::DynLayers(c.into());
 
 
         // Create protocol context
-        let out = execute_circuit::<Lorelei<RING>, DefaultIdx, MixedSharing<_, _, RING>>(
-            &circuit,
-            (2,2,2,2),
-            TestChannel::InMemory,
-        )
-        .await?;
-        assert_eq!(out[], 16);
+        let (ch0, ch1) = seec_channel::in_memory::new_pair(16);
+        let loreleiSharing_0 = LoreleiSharing::default();
+        let loreleiSharing_1 = LoreleiSharing::default();
+        let protocol_state_0 = Lorelei::new(loreleiSharing_0);
+        let protocol_state_1 = Lorelei::new(loreleiSharing_1);
+        let setup0: LoreleiSetupProvider<InsecureMTProvider<R>, R> = LoreleiSetupProvider::new(0, InsecureMTProvider::default(), ch0.0, ch0.1,&loreleiSharing_0);
+        let setup1: LoreleiSetupProvider<InsecureMTProvider<R>, R> = LoreleiSetupProvider::new(1, InsecureMTProvider::default(), ch1.0, ch1.1,&loreleiSharing_0);
+        let (mut ex1, mut ex2) = tokio::try_join!(
+            Executor::new_with_state(protocol_state.clone(), &c, 0, setup0),
+            Executor::new_with_state(protocol_state, &c, 1, setup1),
+        ).unwrap();
+
+        let inp0 = LoreleiSharing::new().share(vec![2,2,2,2]);
+        let inp1 = LoreleiSharing::insecure_default().plain_delta_to_share(mask);
+        let (mut ch1, mut ch2) = seec_channel::in_memory::new_pair(2);
+
+        let h1 = ex1.execute(Input::Scalar(inp0), &mut ch1.0, &mut ch1.1);
+        let h2 = ex2.execute(Input::Scalar(inp1), &mut ch2.0, &mut ch2.1);
+        let (res1, res2) = tokio::try_join!(h1, h2).unwrap();
+        let res = LoreleiSharing::reconstruct(res1.into_scalar().unwrap(), res2.into_scalar().unwrap());
+
+        assert_eq!(vec![16], res);
         Ok(())
     }
 }
