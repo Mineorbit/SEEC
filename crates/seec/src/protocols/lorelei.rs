@@ -29,39 +29,173 @@ use std::cmp;
 use std::cmp::Ordering;
 
 
-// 2 party OT based setup provider
+// 3 party Helper based Setup
 
 
 pub type LoreleiSetupMsg<R> = executor::Message<Lorelei<R>>;
 
-// this maps a gate to a list of its shares of blinding values: the first element of the image is potential gamma shares, i.e. crossterms, the latter output shares
-pub type SetupLookup<R> = HashMap<GateIdx,(Vec<R>,R)>;
 
-#[derive(Clone, Debug, Hash,PartialEq,Eq,PartialOrd,Ord)]
+
+#[derive(Clone, Debug, Hash,PartialEq,Eq,PartialOrd,Ord,Default)]
 pub struct LoreleiSharing<R> {
-    pub(crate) lookup: SetupLookup<R>
-    // TODO: Maybe give access to rngs here like in aby2.0 implementation
+    pub(crate) private_rng: ChaChaRng,
+    pub(crate) local_joint_rng: ChaChaRng,
+    pub(crate) remote_joint_rng: ChaChaRng,
+    pub(crate) circuit_input_owner_map: HashMap<usize, usize>,
+    phantom: PhantomData<R>,
 }
 
-impl<R> Default for LoreleiSharing<R> {
-    fn default() -> Self {
+
+
+
+
+
+// this is the party that sends lambda and gamma shares to the two online parties
+pub struct AstraSetupHelper<R> {
+    sender: MultiSender<AstraSetupMsg<R>>,
+    // shared rng seed owned by helper and p0
+    priv_seed_p0: [u8; 32],
+    // shared rng seed owned by helper and p1
+    priv_seed_p1: [u8; 32],
+    // shared rng seed owned by helper, p0 and p1
+    joint_seed: [u8; 32],
+}
+
+
+impl AstraSetupHelper {
+
+    pub fn new(
+        sender: MultiSender<AstraSetupMsg>,
+        priv_seed_p0: [u8; 32],
+        priv_seed_p1: [u8; 32],
+        joint_seed: [u8; 32],
+    ) -> Self {
         Self {
-            lookup: HashMap::new()
+            sender,
+            priv_seed_p0,
+            priv_seed_p1,
+            joint_seed,
         }
+    }
+
+    pub async fn setup<Idx: GateIdx>(
+        self,
+        circuit: &ExecutableCircuit<bool, BooleanGate, Idx>,
+        input_map: HashMap<usize, InputBy>,
+    ) {
+        let p0_gate_outputs =
+            self.setup_gate_outputs(0, circuit, self.priv_seed_p0, self.joint_seed, &input_map);
+        let p1_gate_outputs =
+            self.setup_gate_outputs(1, circuit, self.priv_seed_p1, self.joint_seed, &input_map);
+
+        let mut rng_p0 = ChaChaRng::from_seed(self.priv_seed_p0);
+        // synchronized with the AstraSetupProvider but different than the stream used for the gate
+        // outputs before
+        rng_p0.set_stream(1);
+
+        // TODO this could potentially be optimized as it reconstructs all lambda values
+        //  but we only need those that are an input to an interactive gate
+        let rec_gate_outputs: Vec<_> = p0_gate_outputs
+            .into_iter()
+            .zip(p1_gate_outputs.into_iter())
+            .map(|(p0_out, p1_out)| {
+                let p0_storage = p0_out.into_scalar().expect("SIMD unsupported");
+                let p1_storage = p1_out.into_scalar().expect("SIMD unsupported");
+                // we only need to reconstruct the private parts which were initialized
+                p0_storage.private ^ p1_storage.private
+            })
+            .collect();
+
+        let mut msg = BitVec::with_capacity(circuit.interactive_count());
+
+        for (gate, _gate_id, parents) in circuit.interactive_with_parents_iter() {
+            match gate {
+                BooleanGate::And { n } => {
+                    assert_eq!(2, n, "Astra setup currently supports 2 input ANDs");
+                    let inputs: [bool; 2] = take_arr(&mut parents.take(2).map(|scg| {
+                        rec_gate_outputs[scg.circuit_id as usize][scg.gate_id.as_usize()]
+                    }));
+                    let lambda_xy = inputs[0] & inputs[1];
+                    let lambda_xy_0: bool = rng_p0.gen();
+                    let lambda_xy_1 = lambda_xy ^ lambda_xy_0;
+                    msg.push(lambda_xy_1);
+                }
+                ni => unreachable!("non interactive gate {ni:?}"),
+            }
+        }
+        self.sender
+            .send_to([1], AstraSetupMsg(msg))
+            .await
+            .expect("failed to send setup message")
+    }
+
+    fn setup_gate_outputs<Idx: GateIdx>(
+        &self,
+        party_id: usize,
+        circuit: &ExecutableCircuit<bool, BooleanGate, Idx>,
+        local_seed: [u8; 32],
+        joint_seed: [u8; 32],
+        input_map: &HashMap<usize, InputBy>,
+    ) -> GateOutputs<ShareVec> {
+        // The idea is to reuse the `Lorelei` setup_gate_outputs method with the correct
+        // rngs to generate the correct values for the helper
+
+        let input_position_share_type_map = input_map
+            .iter()
+            .map(|(&pos, by)| {
+                let st = match (party_id, by) {
+                    (0, InputBy::P0) | (1, InputBy::P1) => ShareType::Local,
+                    (0, InputBy::P1) | (1, InputBy::P0) => ShareType::Remote,
+                    (id, _) => panic!("Unsupported party id {id}"),
+                };
+                (pos, st)
+            })
+            .collect();
+
+        let mut p = Lorelei {
+            delta_sharing_state: DeltaSharing::new(
+                party_id,
+                local_seed,
+                joint_seed,
+                input_position_share_type_map,
+            ),
+        };
+        p.setup_gate_outputs(party_id, circuit)
     }
 }
 
 
-pub struct LoreleiSetupProvider<'a,Mtp,R: Ring> {
+
+
+
+
+
+
+
+
+
+// This is the setup provider that talks to the Astra Setup Helper
+
+#[derive(Clone, Default)]
+pub struct SetupData<R> {
+    eval_shares: Vec<EvalShares<R>>,
+}
+
+#[derive(Clone)]
+pub struct EvalShares<R> {
+    shares: Vec<R>,
+}
+
+
+pub struct AstraSetupProvider<R: Ring> {
     party_id: usize,
-    mt_provider: Mtp,
-    sender: seec_channel::Sender<LoreleiSetupMsg<R>>,
-    receiver: seec_channel::Receiver<LoreleiSetupMsg<R>>,
-    sharing: &'a LoreleiSharing<R>
+    receiver: MultiReceiver<AstraSetupMsg<R>>,
+    rng: ChaChaRng,
+    setup_data: Option<SetupData<R>>,
 }
 
 #[async_trait]
-impl<'a,MtpErr, Mtp, Idx, R: Ring> FunctionDependentSetup<Lorelei<R>, Idx> for LoreleiSetupProvider<'a,Mtp,R>
+impl<MtpErr, Mtp, Idx, R: Ring> FunctionDependentSetup<Lorelei<R>, Idx> for AstraSetupProvider<Mtp,R>
 where
     MtpErr: Error + Send + Sync + Debug + 'static,
     Mtp: MTProvider<Output = MulTriples, Error = MtpErr> + Send,
@@ -75,12 +209,15 @@ where
         circuit: &ExecutableCircuit<R, LoreleiGate<R>, Idx>,
     ) -> Result<(), Self::Error> {
         // TODO: populate sharing with lambda and gamma values
+
+        // receive lambda values from AstraSetupHelper party
+
+
         Ok(())
     }
 
-    // these values end up being the setup data being passed to the protocol context in older implementations, we move this to the protocol struct instead, to allow for easier access, the outputs of this function will be ignored therefore
     async fn request_setup_output(&mut self, count: usize) -> Result<R, Self::Error> {
-        Ok(R::ZERO)
+        Ok(())
     }
 }
 
@@ -106,18 +243,16 @@ impl<'a,Mtp,R: Ring> LoreleiSetupProvider<'a,Mtp,R> {
 
 // -----  ring Lorelei protocol = combined arithmetic and blinded protocol
 
-
-#[derive(Clone, Debug, Default, Hash,PartialEq,PartialOrd,Eq,Ord)]
-pub struct Lorelei<R: Ring> {
-    sharing: LoreleiSharing<R>
-}
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Msg<R> {
     Delta { delta: Vec<R> },
 }
 
+
+#[derive(Clone, Debug, Default, Hash,PartialEq,PartialOrd,Eq,Ord)]
+pub struct Lorelei<R: Ring> {
+    sharing: LoreleiSharing<R>
+}
 
 
 impl<R: Ring> Protocol for Lorelei<R> {
@@ -209,7 +344,34 @@ impl<R: Ring> Protocol for Lorelei<R> {
                     ArithmeticGate::Mul {n} => {
                         let outShareValue = R::ZERO;
 
-                        // TODO: Sum for each posetof gamma values and mask values
+                // TODO: more than two inputs
+                        
+        assert!(matches!(party_id, 0 | 1));
+        assert!(matches!(self, ArithmeticGate::Mul));
+        let mut priv_delta = preprocessing_delta
+            .eval_shares
+            .pop()
+            .expect("Missing eval_share");
+        match self {
+            ArithmeticGate::Mul => {
+                let a = inputs.next().expect("Empty input");
+                let b = inputs.next().expect("Insufficient input");
+                let plain_ab = a.public.wrapping_mul(&b.public);
+                let i = if party_id == 1 { R::ONE } else { R::ZERO };
+                
+                let multiplication_result_arithmetic_share = 
+                i.wrapping_mul(&plain_ab)
+                    .wrapping_sub(&a.public.wrapping_mul(&b.private))
+                    .wrapping_sub(&b.public.wrapping_mul(&a.private))
+                    .wrapping_add(&priv_delta.shares.pop().expect("Missing eval share"));
+
+                LoreleiShare::Arithmetic(ArithmeticShare{
+                    x: multiplication_result_arithmetic_share
+                })
+            }
+            _ => unreachable!(),
+        }
+
 
                         LoreleiShare::Arithmetic(ArithmeticShare {x: outShareValue})
                     }
@@ -576,8 +738,21 @@ mod tests {
     #[tokio::test]
     async fn multi_mult() {
 
-        type RING = u32;
+        let _g = init_tracing();
+        let mut channels = multi::new_local(3);
+        let helper_ch = channels.pop().unwrap();
+        let p1_ch = channels.pop().unwrap();
+        let p0_ch = channels.pop().unwrap();
+        let priv_seed_p0: [u8; 32] = thread_rng().gen();
+        let priv_seed_p1: [u8; 32] = thread_rng().gen();
+        let joint_seed: [u8; 32] = thread_rng().gen();
+        let helper = AstraSetupHelper::new(helper_ch.0, priv_seed_p0, priv_seed_p1, joint_seed);
+    
+        let astra_setup0 = AstraSetupProvider::new(0, p0_ch.1, priv_seed_p0);
+        let astra_setup1 = AstraSetupProvider::new(1, p1_ch.1, priv_seed_p1);
+        
         // Setting up circuit
+        type RING = u32;
         let mut circuit = BaseCircuit::<RING, LG>::new();
         let i0 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
         let i1 = circuit.add_gate(LG::Base(BaseGate::Input(ScalarDim)));
@@ -590,27 +765,39 @@ mod tests {
         let c = ExecutableCircuit::DynLayers(c.into());
 
 
+        // start helper
+        let input_map = (0..8)
+            .map(|i| (i, InputBy::P0))
+            .chain((8..16).map(|i| (i, InputBy::P1)))
+            .collect();
+        let circ_clone = circ.clone();
+        let jh = tokio::spawn(async move { helper.setup(&circ_clone, input_map).await });
+
         // Create protocol context
-        let (ch0, ch1) = seec_channel::in_memory::new_pair(16);
-        let loreleiSharing_0 = LoreleiSharing::default();
-        let loreleiSharing_1 = LoreleiSharing::default();
-        let protocol_state_0 = Lorelei::new(loreleiSharing_0);
-        let protocol_state_1 = Lorelei::new(loreleiSharing_1);
-        let setup0: LoreleiSetupProvider<InsecureMTProvider<R>, R> = LoreleiSetupProvider::new(0, InsecureMTProvider::default(), ch0.0, ch0.1,&loreleiSharing_0);
-        let setup1: LoreleiSetupProvider<InsecureMTProvider<R>, R> = LoreleiSetupProvider::new(1, InsecureMTProvider::default(), ch1.0, ch1.1,&loreleiSharing_0);
-        let (mut ex1, mut ex2) = tokio::try_join!(
-            Executor::new_with_state(protocol_state.clone(), &c, 0, setup0),
-            Executor::new_with_state(protocol_state, &c, 1, setup1),
-        ).unwrap();
+        let mut sharing_state1 = LoreleiSharing::new(0, priv_seed_p0, joint_seed, share_map1);
+        let mut sharing_state2 = LoreleiSharing::new(1, priv_seed_p1, joint_seed, share_map2);
+        let state1 = BooleanAby2::new(sharing_state1.clone());
+        let state2 = BooleanAby2::new(sharing_state2.clone());
+
+        let (mut ex1, mut ex2): (Executor<BooleanAby2, u32>, Executor<BooleanAby2, u32>) =
+            tokio::try_join!(
+                Executor::new_with_state(state1, &circ, 0, astra_setup0),
+                Executor::new_with_state(state2, &circ, 1, astra_setup1)
+            )
+        .unwrap();
+        jh.await.expect("error in helper");
 
         let inp0 = LoreleiSharing::new().share(vec![2,2,2,2]);
         let inp1 = LoreleiSharing::insecure_default().plain_delta_to_share(mask);
-        let (mut ch1, mut ch2) = seec_channel::in_memory::new_pair(2);
+        
+        let (mut ch1, mut ch2) = seec_channel::in_memory::new_pair(16);
 
-        let h1 = ex1.execute(Input::Scalar(inp0), &mut ch1.0, &mut ch1.1);
-        let h2 = ex2.execute(Input::Scalar(inp1), &mut ch2.0, &mut ch2.1);
-        let (res1, res2) = tokio::try_join!(h1, h2).unwrap();
-        let res = LoreleiSharing::reconstruct(res1.into_scalar().unwrap(), res2.into_scalar().unwrap());
+        let (out0, out1) = tokio::try_join!(
+            ex1.execute(Input::Scalar(inp0), &mut ch1.0, &mut ch1.1),
+            ex2.execute(Input::Scalar(inp1), &mut ch2.0, &mut ch2.1),
+        )?;
+
+        let res = LoreleiSharing::reconstruct(out0.into_scalar().unwrap(), out1.into_scalar().unwrap());
 
         assert_eq!(vec![16], res);
         Ok(())

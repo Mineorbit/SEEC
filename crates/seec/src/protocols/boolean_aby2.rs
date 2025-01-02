@@ -35,6 +35,7 @@ pub struct DeltaSharing {
     pub(crate) private_rng: ChaChaRng,
     pub(crate) local_joint_rng: ChaChaRng,
     pub(crate) remote_joint_rng: ChaChaRng,
+    pub(crate) input_position_share_type_map: HashMap<usize, ShareType>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -89,6 +90,7 @@ impl BooleanAby2 {
 }
 
 pub type AbySetupMsg = executor::Message<BooleanGmw>;
+
 
 pub struct AbySetupProvider<Mtp> {
     party_id: usize,
@@ -727,6 +729,7 @@ where
             let mut input_sw_map: AHashMap<_, Secret<_, Idx>> =
                 AHashMap::with_capacity(total_inputs);
             let mut setup_outputs = Vec::with_capacity(circuit.interactive_count());
+            // this cache probably stores 
             let mut setup_sub_circ_cache = AHashMap::with_capacity(total_inputs);
             for (gate, _gate_id, parents) in circuit.interactive_with_parents_iter() {
                 let mut gate_input_shares = vec![];
